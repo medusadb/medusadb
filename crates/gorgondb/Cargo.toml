@@ -11,3 +11,4 @@ categories = ["database"]
 keywords = ["blob-storage", "gorgondb", "medusadb", "immutable", "cache"]
 
 [dependencies]
+blake3.workspace = true

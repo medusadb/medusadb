@@ -12,3 +12,5 @@ publish = false
 
 [workspace.dependencies]
 gorgondb = { path = "crates/gorgondb" }
+
+blake3 = "1.4.1"

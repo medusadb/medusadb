@@ -3,3 +3,59 @@
 
 [cargo-vet]
 version = "0.8"
+
+[[exemptions.arrayref]]
+version = "0.3.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.arrayvec]]
+version = "0.7.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.blake3]]
+version = "1.4.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.block-buffer]]
+version = "0.10.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.cc]]
+version = "1.0.82"
+criteria = "safe-to-deploy"
+
+[[exemptions.cfg-if]]
+version = "1.0.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.constant_time_eq]]
+version = "0.3.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.crypto-common]]
+version = "0.1.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.digest]]
+version = "0.10.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.generic-array]]
+version = "0.14.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.libc]]
+version = "0.2.147"
+criteria = "safe-to-deploy"
+
+[[exemptions.subtle]]
+version = "2.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.typenum]]
+version = "1.16.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.version_check]]
+version = "0.9.4"
+criteria = "safe-to-deploy"
