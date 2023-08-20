@@ -1,0 +1,13 @@
+[package]
+name = "gorgondb"
+description = "An immutable and distributed blob storage system."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+readme = "README.md"
+categories = ["database"]
+keywords = ["blob-storage", "gorgondb", "medusadb", "immutable", "cache"]
+
+[dependencies]

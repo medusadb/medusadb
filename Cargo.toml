@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "crates/gorgondb",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "git@github.com:medusadb/medusadb.git"
+publish = false
+
+[workspace.dependencies]
+gorgondb = { path = "crates/gorgondb" }

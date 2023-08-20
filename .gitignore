@@ -1,0 +1,5 @@
+# Ignore Rust build folder.
+/target/
+
+# This repo contains only libraries: let's not commit `Cargo.lock`.
+Cargo.lock
