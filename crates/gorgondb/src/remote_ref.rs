@@ -1,4 +1,4 @@
-use std::{fmt::Display, str::FromStr};
+use std::{fmt::Display, io::Write, str::FromStr};
 
 use byteorder::ReadBytesExt;
 use bytes::Bytes;
@@ -26,8 +26,9 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, DeserializeFromStr, SerializeDisplay)]
 pub struct RemoteRef {
     pub(crate) ref_size: u64,
+    pub(crate) info_bits: u8,
     pub(crate) hash_algorithm: HashAlgorithm,
-    pub(crate) raw: Bytes,
+    pub(crate) hash: Bytes,
 }
 
 impl RemoteRef {
@@ -50,28 +51,24 @@ impl RemoteRef {
             .try_into()
             .expect("slice's length should fit within an u64");
         let hash_algorithm = HashAlgorithm::Blake3;
-
-        let mut w = Vec::with_capacity(
-            1 + buf_utils::buffer_size_len(ref_size) as usize + 1 + hash_algorithm.size(),
-        );
-
-        buf_utils::write_buffer_size(&mut w, ref_size, info_bits)
-            .expect("raw buffer should be big enough");
-        w.push(hash_algorithm.into());
-        hash_algorithm
-            .hash_to(&mut w, buf)
-            .expect("raw buffer should be big enough");
+        let hash = hash_algorithm.hash_to_vec(buf).into();
 
         Self {
             ref_size,
+            info_bits,
             hash_algorithm,
-            raw: w.into(),
+            hash,
         }
     }
 
     /// Get the size of the referenced buffer.
     pub fn ref_size(&self) -> u64 {
         self.ref_size
+    }
+
+    /// Get the info bits of the referenced buffer.
+    pub fn info_bits(&self) -> u8 {
+        self.info_bits
     }
 
     /// Get the hash algorithm used to hash the remote reference.
@@ -81,13 +78,35 @@ impl RemoteRef {
 
     /// Get the hash associated to the remote reference.
     pub fn hash(&self) -> &[u8] {
-        &self.raw[1 + buf_utils::buffer_size_len(self.ref_size) as usize + 1..]
+        &self.hash
+    }
+
+    /// Write the remote reference to the specified writer, returning the number of bytes written.
+    pub fn write_to(&self, mut w: impl Write) -> std::io::Result<usize> {
+        let count = buf_utils::write_buffer_size(&mut w, self.ref_size, self.info_bits)?
+            + 1
+            + self.hash.len();
+        w.write_all(&[self.hash_algorithm.into()])?;
+        w.write_all(&self.hash)?;
+
+        Ok(count)
+    }
+
+    /// Return a vector of bytes representing the remote reference in a non human-friendly way.
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut res = Vec::with_capacity(
+            buf_utils::buffer_size_len(self.ref_size) as usize + 1 + self.hash.len(),
+        );
+        self.write_to(&mut res)
+            .expect("writing to a memory buffer should never fail");
+
+        res
     }
 }
 
 impl Display for RemoteRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&base85::encode(self.as_ref()))
+        f.write_str(&base85::encode(&self.to_vec()))
     }
 }
 
@@ -113,7 +132,7 @@ impl TryFrom<Bytes> for RemoteRef {
         match buf_utils::read_buffer_size(&mut r).map_err(|err| {
             Error::InvalidRemoteRef(format!("failed to read reference size: {err}"))
         })? {
-            (Some(ref_size), _info_bits) => {
+            (Some(ref_size), info_bits) => {
                 let hash_algorithm = r
                     .read_u8()
                     .map_err(|err| {
@@ -124,10 +143,13 @@ impl TryFrom<Bytes> for RemoteRef {
                         Error::InvalidRemoteRef(format!("failed to parse algorithm: {err}"))
                     })?;
 
+                let hash = raw.slice(r.position() as usize..);
+
                 Ok(Self {
                     ref_size,
+                    info_bits,
                     hash_algorithm,
-                    raw,
+                    hash,
                 })
             }
             (None, _) => Err(Error::InvalidRemoteRef("missing buffer size".to_owned())),
@@ -135,9 +157,13 @@ impl TryFrom<Bytes> for RemoteRef {
     }
 }
 
-impl From<RemoteRef> for Bytes {
-    fn from(value: RemoteRef) -> Self {
-        value.raw
+impl TryFrom<Vec<u8>> for RemoteRef {
+    type Error = Error;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        let value: Bytes = value.into();
+
+        value.try_into()
     }
 }
 
@@ -146,12 +172,6 @@ impl TryFrom<&'_ [u8]> for RemoteRef {
 
     fn try_from(value: &'_ [u8]) -> Result<Self, Self::Error> {
         Bytes::copy_from_slice(value).try_into()
-    }
-}
-
-impl AsRef<[u8]> for RemoteRef {
-    fn as_ref(&self) -> &[u8] {
-        &self.raw
     }
 }
 
@@ -176,7 +196,7 @@ mod tests {
         let remote_ref = RemoteRef::for_slice(&[0x01], 0);
 
         assert_eq!(
-            remote_ref.as_ref(),
+            remote_ref.to_vec(),
             &[
                 0x01, 0x01, 0x01, 0x48, 0xfc, 0x72, 0x1f, 0xbb, 0xc1, 0x72, 0xe0, 0x92, 0x5f, 0xa2,
                 0x7a, 0xf1, 0x67, 0x1d, 0xe2, 0x25, 0xba, 0x92, 0x71, 0x34, 0x80, 0x29, 0x98, 0xb1,
@@ -195,7 +215,7 @@ mod tests {
             ]
         );
 
-        let other = remote_ref.as_ref().try_into().unwrap();
+        let other = remote_ref.to_vec().try_into().unwrap();
         assert_eq!(remote_ref, other);
 
         let remote_ref = RemoteRef::for_slice(
@@ -208,7 +228,7 @@ mod tests {
         );
 
         assert_eq!(
-            remote_ref.as_ref(),
+            remote_ref.to_vec(),
             &[
                 0x01, 0x20, 0x01, 0x9c, 0x4d, 0x78, 0xc2, 0xd6, 0x5a, 0x8e, 0x17, 0x2b, 0x68, 0x4e,
                 0xec, 0xac, 0x47, 0x05, 0x24, 0x15, 0x57, 0xe8, 0x60, 0xe9, 0xa0, 0x41, 0x56, 0x37,
@@ -227,7 +247,7 @@ mod tests {
             ]
         );
 
-        let other = remote_ref.as_ref().try_into().unwrap();
+        let other = remote_ref.to_vec().try_into().unwrap();
         assert_eq!(remote_ref, other);
 
         let remote_ref = RemoteRef::for_slice(
@@ -274,7 +294,7 @@ mod tests {
         );
 
         assert_eq!(
-            remote_ref.as_ref(),
+            remote_ref.to_vec(),
             &[
                 0x02, 0x02, 0x00, 0x01, 0x44, 0x80, 0x4d, 0x04, 0x99, 0xdb, 0x3a, 0x70, 0x27, 0x3a,
                 0xed, 0x86, 0xec, 0xdc, 0xa6, 0x92, 0x57, 0xa1, 0xe6, 0x5b, 0x8e, 0xd0, 0xb8, 0x26,
@@ -293,7 +313,7 @@ mod tests {
             ]
         );
 
-        let other = remote_ref.as_ref().try_into().unwrap();
+        let other = remote_ref.to_vec().try_into().unwrap();
         assert_eq!(remote_ref, other);
     }
 }

@@ -17,11 +17,13 @@ pub(crate) fn buffer_size_len(buf_size: u64) -> u8 {
 /// the resulting value.
 ///
 /// If the buffer size to write is 0, the write is optimized and contains only the `info_bits`.
+///
+/// Returns the number of bytes written.
 pub(crate) fn write_buffer_size(
     mut w: impl Write,
     buf_size: u64,
     info_bits: u8,
-) -> std::io::Result<()> {
+) -> std::io::Result<usize> {
     let mut size_buf = [0; 8];
     byteorder::NetworkEndian::write_u64(&mut size_buf, buf_size);
 
@@ -43,7 +45,9 @@ pub(crate) fn write_buffer_size(
     let size_len = size_len | info_bits << 4;
 
     w.write_all(&[size_len])?;
-    w.write_all(&size_buf[idx..])
+    w.write_all(&size_buf[idx..])?;
+
+    Ok(size_len as usize + 1)
 }
 
 /// Read a buffer size from the specified `Read`.

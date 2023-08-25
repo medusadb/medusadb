@@ -71,6 +71,16 @@ impl HashAlgorithm {
         w.write_all(blake3::hash(buf).as_bytes().as_slice())
     }
 
+    /// Hash the given slice to a vector of bytes.
+    pub fn hash_to_vec(&self, buf: &[u8]) -> Vec<u8> {
+        let mut res = Vec::with_capacity(self.size());
+
+        self.hash_to(&mut res, buf)
+            .expect("hashing to a memory buffer should never fail");
+
+        res
+    }
+
     /// Get the size of the resulting hash.
     pub fn size(&self) -> usize {
         match self {

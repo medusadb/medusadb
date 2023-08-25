@@ -1,4 +1,4 @@
-use std::{fmt::Display, str::FromStr};
+use std::{fmt::Display, io::Write, str::FromStr};
 
 use byteorder::ReadBytesExt;
 use bytes::Bytes;
@@ -41,7 +41,7 @@ pub enum Cairn {
 impl Cairn {
     /// Instantiate an empty ``Cairn``.
     pub fn empty() -> Self {
-        Self::SelfContained(vec![0x00].into())
+        Self::SelfContained(Default::default())
     }
 
     /// Instantiate a new self-contained ``Cairn`` referencing the specified data.
@@ -50,28 +50,52 @@ impl Cairn {
     /// recommended** to never exceed 32 bytes for self-contained [``Cairns``](``Cairn``).
     ///
     /// The data will be copied from the slice.
-    pub fn self_contained(buf: &[u8]) -> Self {
-        let mut raw = Vec::with_capacity(buf.len() + 1);
-        raw.push(0x00);
-        raw.extend_from_slice(buf);
-
-        Self::SelfContained(raw.into())
+    pub fn self_contained(buf: impl Into<Bytes>) -> Self {
+        Self::SelfContained(buf.into())
     }
 
     /// Get the size of the data referenced by this cairn.
     pub fn size(&self) -> u64 {
         match self {
-            Self::SelfContained(raw) => (raw.len() - 1)
+            Self::SelfContained(raw) => raw
+                .len()
                 .try_into()
-                .expect("self-contained data must not exceed the size of an u64"),
+                .expect("self-contained data size must be representable by a u64"),
             Self::RemoteRef(remote_ref) => remote_ref.ref_size(),
+        }
+    }
+
+    /// Write the cairn to the specified writer, returning the number of bytes written.
+    pub fn write_to(&self, mut w: impl Write) -> std::io::Result<usize> {
+        match self {
+            Self::SelfContained(raw) => {
+                w.write_all(&[0x00])?;
+                w.write_all(raw)?;
+
+                Ok(raw.len() + 1)
+            }
+            Self::RemoteRef(remote_ref) => remote_ref.write_to(w),
+        }
+    }
+
+    /// Return a vector of bytes representing the cairn in a non human-friendly way.
+    pub fn to_vec(&self) -> Vec<u8> {
+        match self {
+            Self::SelfContained(raw) => {
+                let mut res = Vec::with_capacity(raw.len() + 1);
+                res.push(0x00u8);
+                res.extend_from_slice(raw);
+
+                res
+            }
+            Self::RemoteRef(remote_ref) => remote_ref.to_vec(),
         }
     }
 }
 
 impl Display for Cairn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&base85::encode(self.as_ref()))
+        f.write_str(&base85::encode(&self.to_vec()))
     }
 }
 
@@ -87,15 +111,6 @@ impl FromStr for Cairn {
     }
 }
 
-impl AsRef<[u8]> for Cairn {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            Self::SelfContained(raw) => raw.as_ref(),
-            Self::RemoteRef(remote_ref) => remote_ref.as_ref(),
-        }
-    }
-}
-
 impl TryFrom<Bytes> for Cairn {
     type Error = Error;
 
@@ -105,7 +120,7 @@ impl TryFrom<Bytes> for Cairn {
         match buf_utils::read_buffer_size(&mut r)
             .map_err(|err| Error::InvalidCairn(format!("failed to read reference size: {err}")))?
         {
-            (Some(ref_size), _info_bits) => {
+            (Some(ref_size), info_bits) => {
                 let hash_algorithm = r
                     .read_u8()
                     .map_err(|err| Error::InvalidCairn(format!("failed to read algorithm: {err}")))?
@@ -114,25 +129,29 @@ impl TryFrom<Bytes> for Cairn {
                         Error::InvalidCairn(format!("failed to parse algorithm: {err}"))
                     })?;
 
+                let hash = raw.slice(r.position() as usize..);
+
                 let remote_ref = RemoteRef {
                     ref_size,
+                    info_bits,
                     hash_algorithm,
-                    raw,
+                    hash,
                 };
 
                 Ok(Self::RemoteRef(remote_ref))
             }
-            (None, _) => Ok(Self::SelfContained(raw)),
+            (None, _) => Ok(Self::SelfContained(raw.slice(1..))),
         }
     }
 }
 
-impl From<Cairn> for Bytes {
-    fn from(value: Cairn) -> Self {
-        match value {
-            Cairn::SelfContained(raw) => raw,
-            Cairn::RemoteRef(remote_ref) => remote_ref.into(),
-        }
+impl TryFrom<Vec<u8>> for Cairn {
+    type Error = Error;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        let buf: Bytes = value.into();
+
+        buf.try_into()
     }
 }
 
