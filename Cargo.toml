@@ -15,12 +15,18 @@ publish = true
 gorgondb = { version = "0.0.1", path = "crates/gorgondb" }
 medusadb = { path = "crates/medusadb" }
 
+async-compat = "0.2.1"
 base85 = "2.0.0"
 blake3 = "1.4.1"
 byteorder = "1.4.3"
 bytes = "1.4.0"
+fastcdc = {version = "3.1", features = ["futures"]}
+futures = "0.3.28"
 rmp-serde = "1.1.2"
+pin-project = "1"
 serde = "1.0.183"
 serde_json = "1.0.105"
 serde_with = "3.3.0"
 thiserror = "1.0.47"
+tokio = {version = "1.32", features = ["full"]}
+tokio-stream = "0.1.14"
