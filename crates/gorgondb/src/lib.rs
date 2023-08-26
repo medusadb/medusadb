@@ -17,6 +17,8 @@
 //! of various storage engines behind several, distributed, layers of in-memory and on-disk local
 //! and remote caches.
 
+mod async_file;
+mod async_source;
 pub(crate) mod buf_utils;
 pub mod cairn;
 pub mod fragmentation;
@@ -24,6 +26,8 @@ pub mod gorgon;
 pub mod hash_algorithm;
 pub mod remote_ref;
 
+pub use async_file::AsyncFileSource;
+pub use async_source::AsyncSource;
 pub use cairn::Cairn;
 pub use fragmentation::FragmentationMethod;
 pub use gorgon::Gorgon;

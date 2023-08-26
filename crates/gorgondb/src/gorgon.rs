@@ -8,7 +8,7 @@ use futures::{
 };
 use pin_project::pin_project;
 
-use crate::{Cairn, RemoteRef};
+use crate::{AsyncSource, Cairn, RemoteRef};
 
 /// An error type.
 #[derive(Debug, thiserror::Error)]
@@ -83,7 +83,7 @@ pub struct Gorgon {}
 
 impl Gorgon {
     /// Write a value and persist it.
-    pub async fn write(r: impl AsyncRead + Unpin) -> Result<Cairn> {
+    pub async fn write(r: impl AsyncSource) -> Result<Cairn> {
         let mut r = AsyncReadHash::new(r);
 
         let mut w = futures::io::sink();
