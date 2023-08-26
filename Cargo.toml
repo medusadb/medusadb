@@ -16,6 +16,7 @@ gorgondb = { version = "0.0.1", path = "crates/gorgondb" }
 medusadb = { path = "crates/medusadb" }
 
 async-compat = "0.2.1"
+async-recursion = "1"
 base85 = "2.0.0"
 blake3 = "1.4.1"
 byteorder = "1.4.3"

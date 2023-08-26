@@ -1,11 +1,13 @@
 use std::{
     fmt::Display,
     io::{Read, Write},
+    pin::Pin,
     str::FromStr,
 };
 
 use byteorder::ReadBytesExt;
 use bytes::Bytes;
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Future};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 
@@ -133,6 +135,41 @@ impl Cairn {
         }
     }
 
+    /// Write the cairn to the specified writer, returning the number of bytes written.
+    pub fn async_write_to<'w>(
+        &'w self,
+        mut w: impl AsyncWrite + Unpin + 'w,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<usize>> + 'w>> {
+        Box::pin(async move {
+            match self {
+                Self::SelfContained(raw) => {
+                    let cnt = buf_utils::async_write_buffer_size_len(
+                        &mut w,
+                        raw.len()
+                            .try_into()
+                            .expect("self-contained data size should be representable by a u8"),
+                        Self::INFO_BITS_SELF_CONTAINED,
+                    )
+                    .await?;
+                    w.write_all(raw).await?;
+
+                    Ok(cnt + raw.len())
+                }
+                Self::RemoteRef(remote_ref) => remote_ref.async_write_to(w).await,
+                Self::Ledger { ref_size, cairn } => {
+                    let cnt = buf_utils::async_write_buffer_size(
+                        &mut w,
+                        *ref_size,
+                        Self::INFO_BITS_LEDGER,
+                    )
+                    .await?;
+
+                    Ok(cairn.async_write_to(w).await? + cnt)
+                }
+            }
+        })
+    }
+
     /// Return a vector of bytes representing the cairn in a non human-friendly way.
     pub fn to_vec(&self) -> Vec<u8> {
         let mut res = Vec::with_capacity(self.buf_len());
@@ -172,6 +209,47 @@ impl Cairn {
                 format!("unexpected info bits `{info_bits:02x}` for cairn"),
             )),
         }
+    }
+
+    /// Read a `Cairn` from the specified async reader.
+    pub fn async_read_from<'r>(
+        mut r: impl AsyncRead + Unpin + 'r,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Self>> + 'r>> {
+        Box::pin(async move {
+            match buf_utils::async_read_buffer_size_len(&mut r)
+                .await
+                .map_err(|err| {
+                    std::io::Error::new(err.kind(), format!("failed to read reference size: {err}"))
+                })? {
+                (raw_size, Self::INFO_BITS_SELF_CONTAINED) => {
+                    let mut buf = vec![0x00; raw_size as usize];
+
+                    r.read_exact(&mut buf).await.map_err(|err| {
+                        std::io::Error::new(err.kind(), "failed to read self-contained data")
+                    })?;
+
+                    Ok(Self::SelfContained(buf.into()))
+                }
+                (size_len, Self::INFO_BITS_REMOTE_REF) => {
+                    let ref_size =
+                        buf_utils::async_read_buffer_size_with_size_len(&mut r, size_len).await?;
+                    RemoteRef::async_read_without_header_from(ref_size, r)
+                        .await
+                        .map(Self::RemoteRef)
+                }
+                (size_len, Self::INFO_BITS_LEDGER) => {
+                    let ref_size =
+                        buf_utils::async_read_buffer_size_with_size_len(&mut r, size_len).await?;
+                    let cairn = Box::new(Cairn::async_read_from(r).await?);
+
+                    Ok(Self::Ledger { ref_size, cairn })
+                }
+                (_, info_bits) => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unexpected info bits `{info_bits:02x}` for cairn"),
+                )),
+            }
+        })
     }
 
     /// Read the `Cairn` from the specified slice.
@@ -296,5 +374,20 @@ mod tests {
 
         let cairn: Cairn = serde_json::from_value(json!(expected)).unwrap();
         assert_eq!(serde_json::to_value(cairn).unwrap(), json!(expected));
+    }
+
+    #[tokio::test]
+    async fn test_cairn_async() {
+        let expected: Cairn = "0Ra".parse().unwrap();
+        let buf = expected.to_vec();
+        let r = futures::io::Cursor::new(&buf);
+
+        let cairn = Cairn::async_read_from(r).await.unwrap();
+        assert_eq!(cairn, expected);
+
+        let mut res = Vec::default();
+        cairn.async_write_to(&mut res).await.unwrap();
+
+        assert_eq!(res, buf);
     }
 }

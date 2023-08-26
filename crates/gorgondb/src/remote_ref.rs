@@ -6,6 +6,7 @@ use std::{
 
 use byteorder::ReadBytesExt;
 use bytes::Bytes;
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 
@@ -96,6 +97,19 @@ impl RemoteRef {
         Ok(count)
     }
 
+    /// Write the remote reference to the specified writer, returning the number of bytes written.
+    pub async fn async_write_to(&self, mut w: impl AsyncWrite + Unpin) -> std::io::Result<usize> {
+        let count =
+            buf_utils::async_write_buffer_size(&mut w, self.ref_size, Cairn::INFO_BITS_REMOTE_REF)
+                .await?
+                + 1
+                + self.hash.len();
+        w.write_all(&[self.hash_algorithm.into()]).await?;
+        w.write_all(&self.hash).await?;
+
+        Ok(count)
+    }
+
     /// Return a vector of bytes representing the remote reference in a non human-friendly way.
     pub fn to_vec(&self) -> Vec<u8> {
         let mut res = Vec::with_capacity(self.buf_len());
@@ -141,12 +155,64 @@ impl RemoteRef {
         })
     }
 
+    pub(crate) async fn async_read_without_header_from(
+        ref_size: u64,
+        mut r: impl AsyncRead + Unpin,
+    ) -> std::io::Result<Self> {
+        let mut buf = vec![0x00; 1];
+        r.read_exact(&mut buf).await.map_err(|err| {
+            std::io::Error::new(err.kind(), format!("failed to read hash algorithm: {err}"))
+        })?;
+
+        let hash_algorithm: HashAlgorithm = buf[0].try_into().map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to parse hash algorithm: {err}"),
+            )
+        })?;
+
+        let mut hash = vec![0x00; hash_algorithm.size()];
+
+        r.read_exact(&mut hash).await.map_err(|err| {
+            std::io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to read {} bytes hash of type `{hash_algorithm}`",
+                    hash_algorithm.size()
+                ),
+            )
+        })?;
+
+        Ok(Self {
+            ref_size,
+            hash_algorithm,
+            hash: hash.into(),
+        })
+    }
+
     /// Read the remote reference from the specified reader.
     pub fn read_from(mut r: impl Read) -> std::io::Result<Self> {
         match buf_utils::read_buffer_size(&mut r).map_err(|err| {
             std::io::Error::new(err.kind(), format!("failed to read reference size: {err}"))
         })? {
             (ref_size, Cairn::INFO_BITS_REMOTE_REF) => Self::read_without_header_from(ref_size, r),
+            (_, info_bits) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid non-zero info bits `0x{info_bits:02x}`"),
+            )),
+        }
+    }
+
+    /// Read the remote reference from the specified async reader.
+    pub async fn async_read_from(mut r: impl AsyncRead + Unpin) -> std::io::Result<Self> {
+        match buf_utils::async_read_buffer_size(&mut r)
+            .await
+            .map_err(|err| {
+                std::io::Error::new(err.kind(), format!("failed to read reference size: {err}"))
+            })? {
+            (ref_size, Cairn::INFO_BITS_REMOTE_REF) => {
+                Self::async_read_without_header_from(ref_size, r).await
+            }
             (_, info_bits) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("invalid non-zero info bits `0x{info_bits:02x}`"),
@@ -208,6 +274,21 @@ mod tests {
 
         let remote_ref: RemoteRef = serde_json::from_value(json!(expected)).unwrap();
         assert_eq!(serde_json::to_value(remote_ref).unwrap(), json!(expected));
+    }
+
+    #[tokio::test]
+    async fn test_remote_ref_async() {
+        let expected = RemoteRef::for_slice(&[0x01]);
+        let buf = expected.to_vec();
+        let r = futures::io::Cursor::new(&buf);
+
+        let remote_ref = RemoteRef::async_read_from(r).await.unwrap();
+        assert_eq!(remote_ref, expected);
+
+        let mut res = Vec::default();
+        remote_ref.async_write_to(&mut res).await.unwrap();
+
+        assert_eq!(res, buf);
     }
 
     #[test]
