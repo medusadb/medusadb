@@ -20,10 +20,12 @@
 pub(crate) mod buf_utils;
 pub mod cairn;
 pub mod fragmentation;
+pub mod gorgon;
 pub mod hash_algorithm;
 pub mod remote_ref;
 
 pub use cairn::Cairn;
 pub use fragmentation::FragmentationMethod;
+pub use gorgon::Gorgon;
 pub use hash_algorithm::HashAlgorithm;
 pub use remote_ref::RemoteRef;
