@@ -33,6 +33,21 @@ impl Default for FragmentationMethod {
 }
 
 impl FragmentationMethod {
+    /// Get the minimum size at which fragmentation will happen.
+    pub fn min_size(&self) -> u64 {
+        match self {
+            Self::Fastcdc(fastcdc) => fastcdc.min_size().into(),
+        }
+    }
+
+    /// Get a hint of how many fragments will be returned as part of the fragmentation process for
+    /// a buffer of the specified size.
+    pub fn fragments_count_hint(&self, buf_size: u64) -> usize {
+        match self {
+            Self::Fastcdc(fastcdc) => fastcdc.fragments_count_hint(buf_size),
+        }
+    }
+
     /// Fragment the specified source buffer asynchronously.
     pub fn fragment<'r>(
         &self,

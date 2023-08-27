@@ -59,6 +59,19 @@ impl Fastcdc {
         }
     }
 
+    /// Get the minimum size at which fragmentation will happen.
+    pub fn min_size(&self) -> u32 {
+        self.min_size
+    }
+
+    /// Get a hint of how many fragments will be returned as part of the fragmentation process for
+    /// a buffer of the specified size.
+    pub fn fragments_count_hint(&self, buf_size: u64) -> usize {
+        (buf_size / self.avg_size as u64)
+            .try_into()
+            .expect("cannot convert u64 to usize")
+    }
+
     /// Fragment the specified source buffer asynchronously.
     pub fn fragment<'r>(
         &self,

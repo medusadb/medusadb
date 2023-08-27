@@ -2,8 +2,11 @@ use std::path::Path;
 
 use async_compat::{Compat, CompatExt};
 use bytes::Bytes;
+use fs4::tokio::AsyncFileExt;
 use futures::{AsyncRead, AsyncReadExt, AsyncSeek};
 use pin_project::pin_project;
+
+use crate::AsyncSource;
 
 /// A source file on disk, opened in read-only.
 #[pin_project]
@@ -11,13 +14,17 @@ pub struct AsyncFileSource {
     #[pin]
     file: Compat<tokio::fs::File>,
 
-    pub(crate) size: u64,
+    size: u64,
 }
 
 impl AsyncFileSource {
     /// Open a file on disk.
     pub async fn open(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let file = tokio::fs::File::options().read(true).open(path).await?;
+
+        // Ensure that no other process is or will be writing to the file as long as we have it.
+        file.try_lock_shared()?;
+
         let size = file.metadata().await?.len();
 
         Ok(Self {
@@ -67,5 +74,11 @@ impl AsyncSeek for AsyncFileSource {
         pos: std::io::SeekFrom,
     ) -> std::task::Poll<std::io::Result<u64>> {
         self.project().file.poll_seek(cx, pos)
+    }
+}
+
+impl AsyncSource for AsyncFileSource {
+    fn size(&self) -> u64 {
+        self.size
     }
 }

@@ -54,6 +54,9 @@ pub enum Cairn {
 }
 
 impl Cairn {
+    /// The maximum size of self-contained values.
+    pub const MAX_SELF_CONTAINED_SIZE: u64 = 63;
+
     const INFO_BITS_SELF_CONTAINED: u8 = 0x00;
     pub(crate) const INFO_BITS_REMOTE_REF: u8 = 0x01;
     const INFO_BITS_LEDGER: u8 = 0x02;

@@ -1,5 +1,6 @@
 use std::{fmt::Display, str::FromStr};
 
+use futures::{AsyncRead, AsyncReadExt};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 
@@ -81,6 +82,40 @@ impl HashAlgorithm {
         res
     }
 
+    /// Hash the contents of an `AsyncRead` to the specified `Write`.
+    pub async fn async_hash_to(
+        &self,
+        mut w: impl std::io::Write,
+        mut r: impl AsyncRead + Unpin,
+    ) -> std::io::Result<()> {
+        match self {
+            Self::Blake3 => {
+                let mut hasher = blake3::Hasher::new();
+                // Attempt to read 16K of data: this allows SIMD optimizations on Blake3 algorithms.
+                let mut buf = vec![0; 16 * 1024];
+
+                loop {
+                    match r.read(&mut buf).await? {
+                        0 => break w.write_all(hasher.finalize().as_bytes().as_slice()),
+                        count => {
+                            hasher.update(&buf[0..count]);
+                            buf.clear();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hash the contents of an `AsyncRead` to a vector.
+    pub async fn async_hash_to_vec(&self, r: impl AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
+        let mut res = Vec::with_capacity(self.size());
+
+        self.async_hash_to(&mut res, r).await?;
+
+        Ok(res)
+    }
+
     /// Get the size of the resulting hash.
     pub fn size(&self) -> usize {
         match self {
@@ -94,12 +129,27 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn test_hash_algorithm() {
+    #[tokio::test]
+    async fn test_hash_algorithm() {
         let alg: HashAlgorithm = "blake3".parse().unwrap();
         assert_eq!(alg.to_string(), "blake3");
 
         let alg: HashAlgorithm = serde_json::from_value(json!("blake3")).unwrap();
         assert_eq!(serde_json::to_value(alg).unwrap(), json!("blake3"));
+
+        let expected = &[
+            177, 119, 236, 27, 242, 109, 251, 59, 112, 16, 212, 115, 230, 212, 71, 19, 178, 155,
+            118, 91, 153, 198, 230, 14, 203, 250, 231, 66, 222, 73, 101, 67,
+        ];
+
+        let hash = HashAlgorithm::Blake3.hash_to_vec(&[1, 2, 3]);
+        assert_eq!(hash, expected);
+
+        let hash = HashAlgorithm::Blake3
+            .async_hash_to_vec(&[1u8, 2, 3][..])
+            .await
+            .unwrap();
+
+        assert_eq!(hash, expected);
     }
 }
