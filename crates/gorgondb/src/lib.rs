@@ -26,6 +26,7 @@ pub mod gorgon;
 pub mod hash_algorithm;
 mod ledger;
 pub mod remote_ref;
+pub mod storage;
 
 pub use async_file_source::AsyncFileSource;
 pub use async_source::AsyncSource;
@@ -35,3 +36,4 @@ pub use gorgon::Gorgon;
 pub use hash_algorithm::HashAlgorithm;
 pub use ledger::Ledger;
 pub use remote_ref::RemoteRef;
+pub use storage::Storage;

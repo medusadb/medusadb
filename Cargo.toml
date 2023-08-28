@@ -17,6 +17,7 @@ medusadb = { path = "crates/medusadb" }
 
 async-compat = "0.2.1"
 async-recursion = "1"
+async-trait = "0.1.73"
 base85 = "2.0.0"
 blake3 = "1.4.1"
 byteorder = "1.4.3"
@@ -24,11 +25,14 @@ bytes = "1.4.0"
 fastcdc = {version = "3.1", features = ["futures"]}
 futures = "0.3.28"
 fs4 = { version = "0.6", features = ["tokio-async"] }
+hex = "0.4.3"
 rmp-serde = "1.1.2"
 pin-project = "1"
+reflink = "0.1.3"
 serde = "1.0.183"
 serde_json = "1.0.105"
 serde_with = "3.3.0"
 thiserror = "1.0.47"
 tokio = {version = "1.32", features = ["full"]}
 tokio-stream = "0.1.14"
+tracing = "0.1.37"

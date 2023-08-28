@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_compat::{Compat, CompatExt};
 use bytes::Bytes;
@@ -14,13 +14,15 @@ pub struct AsyncFileSource {
     #[pin]
     file: Compat<tokio::fs::File>,
 
+    path: PathBuf,
     size: u64,
 }
 
 impl AsyncFileSource {
     /// Open a file on disk.
-    pub async fn open(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        let file = tokio::fs::File::options().read(true).open(path).await?;
+    pub async fn open(path: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let path = path.into();
+        let file = tokio::fs::File::options().read(true).open(&path).await?;
 
         // Ensure that no other process is or will be writing to the file as long as we have it.
         file.try_lock_shared()?;
@@ -29,6 +31,7 @@ impl AsyncFileSource {
 
         Ok(Self {
             file: file.compat(),
+            path,
             size,
         })
     }
@@ -80,5 +83,9 @@ impl AsyncSeek for AsyncFileSource {
 impl AsyncSource for AsyncFileSource {
     fn size(&self) -> u64 {
         self.size
+    }
+
+    fn source_path(&self) -> Option<&Path> {
+        Some(&self.path)
     }
 }

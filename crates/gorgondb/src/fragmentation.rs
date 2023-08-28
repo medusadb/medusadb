@@ -11,7 +11,7 @@ pub use self::fastcdc::Fastcdc;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A Fastcdc error happened.
-    #[error("fastcdc: {0}")]
+    #[error("FastCDC: {0}")]
     Fastcdc(#[from] ::fastcdc::v2020::Error),
 }
 

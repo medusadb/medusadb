@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use bytes::Bytes;
 use futures::{AsyncRead, AsyncSeek};
 
@@ -17,6 +19,14 @@ pub trait AsyncSource: AsyncRead + AsyncSeek + Unpin {
     /// In effect, this prevents implementing `AsyncSource` for buffers of unknown size, which is
     /// desired.
     fn size(&self) -> u64;
+
+    /// Get the source path on disk, if there is one.
+    ///
+    /// This is used to allow some optimizations for local operations on operating systems that
+    /// support it.
+    fn source_path(&self) -> Option<&Path> {
+        None
+    }
 }
 
 impl AsyncSource for futures::io::Cursor<&[u8]> {
