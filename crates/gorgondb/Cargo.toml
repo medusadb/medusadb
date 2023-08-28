@@ -10,12 +10,26 @@ readme = "README.md"
 categories = ["database"]
 keywords = ["blob-storage", "gorgondb", "medusadb", "immutable", "cache"]
 
+[lib]
+name = "gorgondb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gorgoncli"
+path = "src/bin/cli.rs"
+
+[features]
+default = ["cli"]
+cli = ["dep:anyhow", "dep:clap"]
+
 [dependencies]
+anyhow = { workspace = true, optional = true }
 async-compat.workspace = true
 base85.workspace = true
 blake3.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
+clap = { workspace = true, optional = true }
 fastcdc.workspace = true
 futures.workspace = true
 fs4.workspace = true

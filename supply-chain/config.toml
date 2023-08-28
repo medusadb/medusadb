@@ -20,6 +20,30 @@ criteria = "safe-to-deploy"
 version = "0.1.5"
 criteria = "safe-to-deploy"
 
+[[exemptions.anstream]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.anstyle]]
+version = "1.0.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.anstyle-parse]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.anstyle-query]]
+version = "1.0.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.anstyle-wincon]]
+version = "2.1.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.anyhow]]
+version = "1.0.75"
+criteria = "safe-to-deploy"
+
 [[exemptions.arrayref]]
 version = "0.3.7"
 criteria = "safe-to-deploy"
@@ -90,6 +114,26 @@ criteria = "safe-to-deploy"
 
 [[exemptions.chrono]]
 version = "0.4.26"
+criteria = "safe-to-deploy"
+
+[[exemptions.clap]]
+version = "4.4.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.clap_builder]]
+version = "4.4.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.clap_derive]]
+version = "4.4.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.clap_lex]]
+version = "0.5.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.colorchoice]]
+version = "1.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.constant_time_eq]]
@@ -198,6 +242,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.hashbrown]]
 version = "0.14.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.heck]]
+version = "0.4.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.hermit-abi]]
@@ -446,6 +494,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.unicode-ident]]
 version = "1.0.11"
+criteria = "safe-to-deploy"
+
+[[exemptions.utf8parse]]
+version = "0.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.version_check]]

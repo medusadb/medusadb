@@ -1,6 +1,7 @@
 mod filesystem;
 
 pub use filesystem::FilesystemStorage;
+use futures::AsyncRead;
 
 use crate::{AsyncSource, HashAlgorithm, RemoteRef};
 
@@ -27,17 +28,26 @@ pub enum Storage {
 }
 
 impl Storage {
-    /// Store a value and ensures it has
+    /// Retrieve a value
+    pub(crate) async fn retrieve(
+        &self,
+        remote_ref: &RemoteRef,
+    ) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+        match self {
+            Self::Filesystem(storage) => Ok(Box::new(storage.retrieve(remote_ref).await?)),
+        }
+    }
+
+    /// Store a value and ensures it has the proper remote ref.
     pub(crate) async fn store(
         &self,
-        ref_size: u64,
         hash_algorithm: HashAlgorithm,
         mut source: impl AsyncSource,
     ) -> Result<RemoteRef> {
         let hash = hash_algorithm.async_hash_to_vec(&mut source).await?.into();
 
         let remote_ref = RemoteRef {
-            ref_size,
+            ref_size: source.size(),
             hash_algorithm,
             hash,
         };

@@ -62,7 +62,7 @@ impl Ledger {
     }
 
     /// Read a `Ledger` from the specified reader.
-    pub async fn async_read_from(mut r: impl AsyncRead + Unpin) -> std::io::Result<Self> {
+    pub async fn async_read_from(mut r: impl AsyncRead + Unpin + Send) -> std::io::Result<Self> {
         let mut buf = vec![0x00; 1];
         r.read_exact(&mut buf).await?;
 

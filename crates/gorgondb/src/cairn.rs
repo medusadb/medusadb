@@ -216,8 +216,8 @@ impl Cairn {
 
     /// Read a `Cairn` from the specified async reader.
     pub fn async_read_from<'r>(
-        mut r: impl AsyncRead + Unpin + 'r,
-    ) -> Pin<Box<dyn Future<Output = std::io::Result<Self>> + 'r>> {
+        mut r: impl AsyncRead + Unpin + Send + 'r,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Self>> + Send + 'r>> {
         Box::pin(async move {
             match buf_utils::async_read_buffer_size_len(&mut r)
                 .await

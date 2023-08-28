@@ -71,6 +71,7 @@ mod tests {
                 .expect("failed to open text sample file");
             let expected_size = r.metadata().await.unwrap().len() as usize;
 
+            #[allow(clippy::redundant_closure_call)]
             let stream = $fragment_fn(r.compat());
 
             use futures::TryStreamExt;

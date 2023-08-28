@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use bytes::Bytes;
-use futures::{AsyncRead, AsyncSeek};
+use futures::{future::BoxFuture, AsyncRead, AsyncSeek};
 
 /// A trait for types that can be used a source for data.
 ///
@@ -24,9 +24,18 @@ pub trait AsyncSource: AsyncRead + AsyncSeek + Unpin {
     ///
     /// This is used to allow some optimizations for local operations on operating systems that
     /// support it.
-    fn source_path(&self) -> Option<&Path> {
+    fn path(&self) -> Option<&Path> {
         None
     }
+
+    /// Get the source, as a slice, if it was already loaded in memory.
+    fn data(&self) -> Option<&[u8]> {
+        None
+    }
+
+    /// Write the source to disk, possibly using optimizations from the underlying operating
+    /// system.
+    fn write_to_file<'s>(&'s mut self, path: &'s Path) -> BoxFuture<'s, std::io::Result<()>>;
 }
 
 impl AsyncSource for futures::io::Cursor<&[u8]> {
@@ -35,6 +44,14 @@ impl AsyncSource for futures::io::Cursor<&[u8]> {
             .len()
             .try_into()
             .expect("buffers larger than 2^64 are not supported")
+    }
+
+    fn data(&self) -> Option<&[u8]> {
+        Some(self.get_ref())
+    }
+
+    fn write_to_file<'s>(&'s mut self, path: &'s Path) -> BoxFuture<'s, std::io::Result<()>> {
+        Box::pin(tokio::fs::write(path, self.get_ref()))
     }
 }
 
@@ -45,6 +62,14 @@ impl AsyncSource for futures::io::Cursor<Vec<u8>> {
             .try_into()
             .expect("buffers larger than 2^64 are not supported")
     }
+
+    fn data(&self) -> Option<&[u8]> {
+        Some(self.get_ref())
+    }
+
+    fn write_to_file<'s>(&'s mut self, path: &'s Path) -> BoxFuture<'s, std::io::Result<()>> {
+        Box::pin(tokio::fs::write(path, self.get_ref()))
+    }
 }
 
 impl AsyncSource for futures::io::Cursor<Bytes> {
@@ -53,5 +78,13 @@ impl AsyncSource for futures::io::Cursor<Bytes> {
             .len()
             .try_into()
             .expect("buffers larger than 2^64 are not supported")
+    }
+
+    fn data(&self) -> Option<&[u8]> {
+        Some(self.get_ref())
+    }
+
+    fn write_to_file<'s>(&'s mut self, path: &'s Path) -> BoxFuture<'s, std::io::Result<()>> {
+        Box::pin(tokio::fs::write(path, self.get_ref()))
     }
 }
