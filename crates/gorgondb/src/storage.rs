@@ -1,7 +1,9 @@
 mod filesystem;
 
+use std::io::SeekFrom;
+
 pub use filesystem::FilesystemStorage;
-use futures::AsyncRead;
+use futures::{AsyncRead, AsyncSeek, AsyncSeekExt};
 
 use crate::{AsyncSource, HashAlgorithm, RemoteRef};
 
@@ -42,9 +44,10 @@ impl Storage {
     pub(crate) async fn store(
         &self,
         hash_algorithm: HashAlgorithm,
-        mut source: impl AsyncSource,
+        mut source: impl AsyncSource + AsyncSeek,
     ) -> Result<RemoteRef> {
         let hash = hash_algorithm.async_hash_to_vec(&mut source).await?.into();
+        source.seek(SeekFrom::Start(0)).await?;
 
         let remote_ref = RemoteRef {
             ref_size: source.size(),

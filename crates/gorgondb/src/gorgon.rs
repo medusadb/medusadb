@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use async_compat::CompatExt;
-use futures::{future::BoxFuture, AsyncRead, AsyncReadExt, TryStreamExt};
+use futures::{future::BoxFuture, AsyncRead, AsyncReadExt, AsyncSeek, TryStreamExt};
 
 use crate::{
     ledger::Ledger, storage::FilesystemStorage, AsyncFileSource, AsyncSource, Cairn,
@@ -117,7 +117,7 @@ impl Gorgon {
     /// appropriately.
     pub fn store<'s>(
         &'s self,
-        mut source: impl AsyncSource + Send + 's,
+        mut source: impl AsyncSource + AsyncSeek + Send + 's,
         options: &'s StoreOptions,
     ) -> BoxFuture<'s, Result<Cairn>> {
         Box::pin(async move {

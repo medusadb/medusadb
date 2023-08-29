@@ -3,10 +3,8 @@ use std::path::{Path, PathBuf};
 use async_compat::{Compat, CompatExt};
 use bytes::Bytes;
 use fs4::tokio::AsyncFileExt;
-use futures::{future::BoxFuture, AsyncRead, AsyncReadExt, AsyncSeek};
+use futures::{AsyncRead, AsyncReadExt, AsyncSeek};
 use pin_project::pin_project;
-use reflink::reflink;
-use tokio::io::AsyncWriteExt;
 
 use crate::AsyncSource;
 
@@ -112,36 +110,5 @@ impl AsyncSource for AsyncFileSource {
 
     fn path(&self) -> Option<&Path> {
         Some(&self.path)
-    }
-
-    fn write_to_file<'s>(&'s mut self, path: &'s Path) -> BoxFuture<'s, std::io::Result<()>> {
-        Box::pin(async move {
-            tracing::debug!(
-                "Source has a path on the local filesystem (`{}`): will attempt a copy using `reflink`.",
-                self.path.display(),
-            );
-
-            match reflink(&self.path, path) {
-                Ok(()) => {
-                    return Ok(());
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "Failed to copy file using `reflink` ({err}): will fallback to in-memory copy."
-                    );
-                }
-            }
-
-            let mut target = tokio::fs::File::options()
-                .create_new(true)
-                .open(path)
-                .await?;
-
-            target.try_lock_exclusive()?;
-            futures::io::copy(self, &mut target.compat_mut()).await?;
-            target.shutdown().await?;
-
-            Ok(())
-        })
     }
 }
