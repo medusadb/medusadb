@@ -1,12 +1,21 @@
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    task::Poll,
+};
 
-use async_compat::CompatExt;
+use async_compat::{Compat, CompatExt};
 use fs4::tokio::AsyncFileExt;
+use futures::AsyncRead;
 use hex::ToHex;
+use pin_project::pin_project;
 use reflink::reflink;
-use tokio::io::AsyncWriteExt;
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{OwnedSemaphorePermit, Semaphore},
+};
 
-use crate::{AsyncFileSource, AsyncSource, RemoteRef};
+use crate::{AsyncReadInit, AsyncSource, RemoteRef};
 
 use super::Result;
 
@@ -14,6 +23,7 @@ use super::Result;
 #[derive(Debug, Clone)]
 pub struct FilesystemStorage {
     root: PathBuf,
+    semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl FilesystemStorage {
@@ -22,14 +32,29 @@ impl FilesystemStorage {
         let root = root.into();
         std::fs::create_dir_all(&root)?;
 
-        Ok(Self { root })
+        let semaphore = Arc::new(Semaphore::new(20));
+
+        Ok(Self { root, semaphore })
     }
 
     /// Retrieve a value on disk.
-    pub async fn retrieve(&self, remote_ref: &RemoteRef) -> Result<AsyncFileSource> {
+    pub async fn retrieve(&self, remote_ref: &RemoteRef) -> AsyncReadInit<'static, impl AsyncRead> {
         let source = self.get_path(remote_ref);
+        let semaphore = self.semaphore.clone();
 
-        AsyncFileSource::open(source).await.map_err(Into::into)
+        AsyncReadInit::new(async move {
+            let permit = semaphore.acquire_owned().await.map_err(|err| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!(
+                        "failed to acquire semaphore for reading `{}`: {err}",
+                        source.display()
+                    ),
+                )
+            })?;
+
+            FilesystemAsyncRead::load(permit, source).await
+        })
     }
 
     /// Store a value on disk.
@@ -67,7 +92,8 @@ impl FilesystemStorage {
         }
 
         match tokio::fs::File::options()
-            .create_new(true)
+            .create(true)
+            .write(true)
             .open(&target)
             .await
         {
@@ -97,7 +123,7 @@ impl FilesystemStorage {
             }
             Err(err) => Err(std::io::Error::new(
                 err.kind(),
-                format!("failed to create file `{}`", target.display()),
+                format!("failed to create file `{}`: {err}", target.display()),
             )
             .into()),
         }
@@ -105,5 +131,59 @@ impl FilesystemStorage {
 
     fn get_path(&self, remote_ref: &RemoteRef) -> PathBuf {
         self.root.join(remote_ref.to_vec().encode_hex::<String>())
+    }
+}
+
+#[pin_project(project = FilesystemAsyncReadImpl)]
+enum FilesystemAsyncRead<Inner> {
+    Reading {
+        permit: OwnedSemaphorePermit,
+
+        #[pin]
+        inner: Inner,
+    },
+    Done,
+}
+
+impl FilesystemAsyncRead<Compat<tokio::fs::File>> {
+    async fn load(permit: OwnedSemaphorePermit, path: impl AsRef<Path>) -> std::io::Result<Self> {
+        let path = path.as_ref();
+
+        let file = tokio::fs::File::options()
+            .read(true)
+            .open(&path)
+            .await
+            .map_err(|err| {
+                std::io::Error::new(
+                    err.kind(),
+                    format!("failed to open `{}`: {err}", path.display()),
+                )
+            })?;
+
+        let inner = file.compat();
+
+        Ok(Self::Reading { permit, inner })
+    }
+}
+
+impl<Inner: AsyncRead + Unpin> AsyncRead for FilesystemAsyncRead<Inner> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        loop {
+            match self.as_mut().project() {
+                FilesystemAsyncReadImpl::Reading { inner, .. } => match inner.poll_read(cx, buf) {
+                    Poll::Ready(Ok(size)) if size == 0 => {}
+                    res => return res,
+                },
+                FilesystemAsyncReadImpl::Done => return Poll::Ready(Ok(0)),
+            };
+
+            // We are done reading: release the inner stream and the permit right away in case
+            // the instance is kept around.
+            *self.as_mut() = Self::Done;
+        }
     }
 }

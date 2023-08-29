@@ -13,15 +13,19 @@ use crate::{
 /// An error type.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// An I/O error occured.
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
 
+    /// A `Cairn` error occured.
     #[error("cairn error: {0}")]
     Cairn(#[from] crate::cairn::Error),
 
+    /// A storage error occured.
     #[error("storage error: {0}")]
     Storage(#[from] crate::storage::Error),
 
+    /// A fragmentation error occured.
     #[error("fragmentation error: {0}")]
     Fragmentation(#[from] crate::fragmentation::Error),
 }
@@ -38,6 +42,7 @@ pub struct StoreOptions {
     disable_fragmentation: bool,
 }
 
+/// A `Gorgon` implements high-level primitives to store and retrieve data blobs.
 #[derive(Debug)]
 pub struct Gorgon {
     hash_algorithm: HashAlgorithm,

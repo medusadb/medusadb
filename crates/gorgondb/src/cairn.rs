@@ -1,3 +1,5 @@
+//! An identifier type for data blobs.
+
 use std::{
     fmt::Display,
     io::{Read, Write},
@@ -50,7 +52,12 @@ pub enum Cairn {
     RemoteRef(RemoteRef),
 
     /// The ``Cairn`` is an aggregation of other cairns.
-    Ledger { ref_size: u64, cairn: Box<Self> },
+    Ledger {
+        /// The total size of the reference value.
+        ref_size: u64,
+        /// A `Cairn` that references the internal ledger data.
+        cairn: Box<Self>,
+    },
 }
 
 impl Cairn {

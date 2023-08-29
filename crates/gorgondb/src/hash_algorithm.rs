@@ -1,3 +1,5 @@
+//! A hash algorithm.
+
 use std::{fmt::Display, str::FromStr};
 
 use futures::{AsyncRead, AsyncReadExt};

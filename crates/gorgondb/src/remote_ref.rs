@@ -1,3 +1,5 @@
+//! An identifier type for remote references.
+
 use std::{
     fmt::Display,
     io::{Read, Write},

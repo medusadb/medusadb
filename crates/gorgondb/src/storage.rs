@@ -1,3 +1,5 @@
+//! Low-level remote reference types and implementations.
+
 mod filesystem;
 
 use std::io::SeekFrom;
@@ -10,9 +12,11 @@ use crate::{AsyncSource, HashAlgorithm, RemoteRef};
 /// An error type for storage implementations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// An I/O error occured.
     #[error("I/O: {0}")]
     IO(#[from] std::io::Error),
 
+    /// Data corruption was detected.
     #[error("data corruption: {0}")]
     DataCorruption(String),
 }
@@ -36,7 +40,7 @@ impl Storage {
         remote_ref: &RemoteRef,
     ) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
         match self {
-            Self::Filesystem(storage) => Ok(Box::new(storage.retrieve(remote_ref).await?)),
+            Self::Filesystem(storage) => Ok(Box::new(storage.retrieve(remote_ref).await)),
         }
     }
 

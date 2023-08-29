@@ -18,6 +18,7 @@
 //! and remote caches.
 
 mod async_file_source;
+mod async_read_init;
 mod async_source;
 pub(crate) mod buf_utils;
 pub mod cairn;
@@ -29,6 +30,7 @@ pub mod remote_ref;
 pub mod storage;
 
 pub use async_file_source::AsyncFileSource;
+pub use async_read_init::AsyncReadInit;
 pub use async_source::AsyncSource;
 pub use cairn::Cairn;
 pub use fragmentation::FragmentationMethod;

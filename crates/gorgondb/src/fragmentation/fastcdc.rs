@@ -14,7 +14,7 @@ pub struct Fastcdc {
 
 impl Default for Fastcdc {
     fn default() -> Self {
-        Self::new(2 * 1024, 4 * 1024, 8 * 1024)
+        Self::new(1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024)
     }
 }
 

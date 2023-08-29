@@ -1,3 +1,5 @@
+//! The `gorgoncli` implementation.
+
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
