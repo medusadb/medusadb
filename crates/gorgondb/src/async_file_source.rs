@@ -24,12 +24,35 @@ impl AsyncFileSource {
     /// Open a file on disk.
     pub async fn open(path: impl Into<PathBuf>) -> std::io::Result<Self> {
         let path = path.into();
-        let file = tokio::fs::File::options().read(true).open(&path).await?;
+        let file = tokio::fs::File::options()
+            .read(true)
+            .open(&path)
+            .await
+            .map_err(|err| {
+                std::io::Error::new(
+                    err.kind(),
+                    format!("failed to open `{}`: {err}", path.display()),
+                )
+            })?;
 
         // Ensure that no other process is or will be writing to the file as long as we have it.
-        file.try_lock_shared()?;
+        file.try_lock_shared().map_err(|err| {
+            std::io::Error::new(
+                err.kind(),
+                format!("failed to lock `{}`: {err}", path.display()),
+            )
+        })?;
 
-        let size = file.metadata().await?.len();
+        let size = file
+            .metadata()
+            .await
+            .map_err(|err| {
+                std::io::Error::new(
+                    err.kind(),
+                    format!("failed to read metadata for `{}`: {err}", path.display()),
+                )
+            })?
+            .len();
 
         Ok(Self {
             file: file.compat(),
