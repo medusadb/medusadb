@@ -18,8 +18,7 @@ medusadb = { path = "crates/medusadb" }
 
 anyhow = "1.0.75"
 async-compat = "0.2.1"
-async-recursion = "1"
-async-trait = "0.1.73"
+base64 = "0.21.3"
 base85 = "2.0.0"
 blake3 = "1.4.1"
 byteorder = "1.4.3"

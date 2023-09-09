@@ -25,8 +25,7 @@ cli = ["dep:anyhow", "dep:clap"]
 [dependencies]
 anyhow = { workspace = true, optional = true }
 async-compat.workspace = true
-async-trait.workspace = true
-base85.workspace = true
+base64.workspace = true
 blake3.workspace = true
 byteorder.workspace = true
 bytes.workspace = true

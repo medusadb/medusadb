@@ -7,6 +7,7 @@ use std::{
     str::FromStr,
 };
 
+use base64::Engine;
 use byteorder::ReadBytesExt;
 use bytes::Bytes;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Future};
@@ -284,7 +285,7 @@ impl Cairn {
 
 impl Display for Cairn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&base85::encode(&self.to_vec()))
+        f.write_str(&base64::engine::general_purpose::URL_SAFE.encode(self.to_vec()))
     }
 }
 
@@ -292,8 +293,9 @@ impl FromStr for Cairn {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let raw = base85::decode(s)
-            .map_err(|err| Error::InvalidCairn(format!("failed to parse base85 string: {err}")))?;
+        let raw = base64::engine::general_purpose::URL_SAFE
+            .decode(s)
+            .map_err(|err| Error::InvalidCairn(format!("failed to parse base64 string: {err}")))?;
 
         Self::read_from(std::io::Cursor::new(raw))
             .map_err(|err| Error::InvalidCairn(err.to_string()))
@@ -314,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_cairn_empty() {
-        let expected = "00"; // Contains `vec[]`.
+        let expected = "AA=="; // Contains `vec[]`.
         let cairn = Cairn::empty();
         assert_eq!(cairn, Cairn::SelfContained(Bytes::new()));
         assert_eq!(cairn.to_string(), expected);
@@ -326,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_cairn_self_contained() {
-        let expected = "0Ra"; // Contains `vec[0x01]`.
+        let expected = "AQE="; // Contains `vec[0x01]`.
         let cairn: Cairn = expected.parse().unwrap();
         assert_eq!(cairn, Cairn::self_contained(vec![0x01]).unwrap());
         assert_eq!(cairn.to_string(), expected);
@@ -338,7 +340,7 @@ mod tests {
 
     #[test]
     fn test_cairn_remote_ref() {
-        let expected = "K>-0s{Bj?=!E)e|U!r>PXC2}tx{`4;fGL=<3KeLfh-E7";
+        let expected = "QQEBSPxyH7vBcuCSX6J68Wcd4iW6knE0gCmYsQoVaKGIZSs=";
         let cairn: Cairn = expected.parse().unwrap();
         assert!(matches!(cairn, Cairn::RemoteRef(_)));
         assert_eq!(cairn.to_string(), expected);
@@ -370,7 +372,7 @@ mod tests {
         //  |     \- The encoded size of the aggregated data: that's 1 + 1 = 2.
         //  |
         //  \- The ledger info bit (0x03 << 6) followed by the size of the size (1).
-        let expected = "fdT{p0RaL";
+        let expected = "gQIEAQEBAg==";
         let cairn: Cairn = expected.parse().unwrap();
         assert_eq!(
             cairn,
@@ -388,7 +390,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cairn_async() {
-        let expected: Cairn = "0Ra".parse().unwrap();
+        let expected: Cairn = "AQE=".parse().unwrap();
         let buf = expected.to_vec();
         let r = futures::io::Cursor::new(&buf);
 

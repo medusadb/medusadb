@@ -6,6 +6,7 @@ use std::{
     str::FromStr,
 };
 
+use base64::Engine;
 use byteorder::ReadBytesExt;
 use bytes::Bytes;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -31,8 +32,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 ///
 /// # Handling remote-references
 ///
-/// Remote references are designed to be printable and - as such - parseable. To remain space
-/// efficient, they are displayed using [`base85`](https://datatracker.ietf.org/doc/html/rfc1924).
+/// Remote references are designed to be printable and - as such - parseable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, DeserializeFromStr, SerializeDisplay)]
 pub struct RemoteRef {
     pub(crate) ref_size: u64,
@@ -245,7 +245,7 @@ impl RemoteRef {
 
 impl Display for RemoteRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&base85::encode(&self.to_vec()))
+        f.write_str(&base64::engine::general_purpose::URL_SAFE.encode(self.to_vec()))
     }
 }
 
@@ -253,9 +253,11 @@ impl FromStr for RemoteRef {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let raw = base85::decode(s).map_err(|err| {
-            Error::InvalidRemoteRef(format!("failed to parse base85 string: {err}"))
-        })?;
+        let raw = base64::engine::general_purpose::URL_SAFE
+            .decode(s)
+            .map_err(|err| {
+                Error::InvalidRemoteRef(format!("failed to parse base64 string: {err}"))
+            })?;
 
         Self::read_from(std::io::Cursor::new(raw))
             .map_err(|err| Error::InvalidRemoteRef(err.to_string()))
@@ -270,7 +272,7 @@ mod tests {
 
     #[test]
     fn test_remote_ref() {
-        let expected = "K>-0s{Bj?=!E)e|U!r>PXC2}tx{`4;fGL=<3KeLfh-E7";
+        let expected = "QQEBSPxyH7vBcuCSX6J68Wcd4iW6knE0gCmYsQoVaKGIZSs=";
         let remote_ref: RemoteRef = expected.parse().unwrap();
         assert_eq!(remote_ref.to_string(), expected);
 
