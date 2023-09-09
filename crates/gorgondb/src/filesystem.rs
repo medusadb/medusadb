@@ -48,6 +48,15 @@ impl Filesystem {
         let path = path.as_ref();
         let source = source.into();
 
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|err| {
+                std::io::Error::new(
+                    err.kind(),
+                    format!("failed to create parent directory for `{}`", path.display()),
+                )
+            })?;
+        }
+
         if let Some(source_path) = source.path() {
             tracing::debug!(
                 "Source has a path on the local filesystem (`{}`): will attempt a copy using `reflink`.",

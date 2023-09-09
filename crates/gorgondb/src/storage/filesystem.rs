@@ -58,6 +58,18 @@ impl FilesystemStorage {
     }
 
     fn get_path(&self, remote_ref: &RemoteRef) -> PathBuf {
-        self.root.join(remote_ref.to_vec().encode_hex::<String>())
+        let hex_id = remote_ref.to_vec().encode_hex::<String>();
+
+        // Make sure we split the identifier in folders to avoid ending up with too many files in a
+        // given folder, which can sometimes cause issues on some filesystems.
+
+        // Skip the header and go straight for the hash.
+        let header_len = (crate::buf_utils::buffer_size_len(remote_ref.ref_size()) * 2) as usize;
+        let (_header, rest) = hex_id.split_at(header_len);
+        let (first, rest) = rest.split_at(2);
+        let (second, rest) = rest.split_at(2);
+        let (third, _) = rest.split_at(2);
+
+        self.root.join(first).join(second).join(third).join(hex_id)
     }
 }
