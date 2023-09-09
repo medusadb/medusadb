@@ -1,74 +1,103 @@
-use std::path::Path;
+use std::{borrow::Cow, path::Path};
 
 use bytes::Bytes;
-use futures::AsyncRead;
+use futures::{future::BoxFuture, AsyncRead};
 
-/// A trait for types that can be used a source for data.
-///
-/// This trait sould only ever be implemented for local (in-memory or on-disk) data sources, and is
-/// designed to allow some early optimizations before sending out a complete buffer on the network
-/// when storing a value.
-///
-/// `AsyncSource` requires data to be re-readable, which allows the process to compute the full
-/// hash for the data, possibly checking for existence on a remote server, and then restart the
-/// reading operation for the actual data sending. Without this requirement, we would need to
-/// always keep the full data in memory, which would be problematic for larger files.
-pub trait AsyncSource: AsyncRead + Unpin {
-    /// Get the size of the underlying data.
-    ///
-    /// In effect, this prevents implementing `AsyncSource` for buffers of unknown size, which is
-    /// desired.
-    fn size(&self) -> u64;
+use crate::{AsyncFileSource, AsyncSourceChain};
 
-    /// Get the source path on disk, if there is one.
-    ///
-    /// This is used to allow some optimizations for local operations on operating systems that
-    /// support it.
-    fn path(&self) -> Option<&Path> {
-        None
+/// A convenience type for boxed `AsyncRead` that can be unpinned.
+pub type BoxAsyncRead<'s> = Box<dyn AsyncRead + Send + Unpin + 's>;
+
+/// A source of data that can be read asynchronously.
+pub enum AsyncSource<'d> {
+    /// The source is a buffer in memory, either owned or borrowed.
+    Memory(Cow<'d, [u8]>),
+    /// The source is a chain of `AsyncSource`.
+    Chain(AsyncSourceChain<'d>),
+    /// The source is a file on disk.
+    File(AsyncFileSource),
+}
+
+impl<'d> AsyncSource<'d> {
+    /// Get the size of the data.
+    pub fn size(&self) -> u64 {
+        match self {
+            Self::Memory(buf) => buf.len().try_into().expect("buffer size should fit a u64"),
+            Self::Chain(chain) => chain.size(),
+            Self::File(file) => file.size(),
+        }
     }
 
-    /// Get the source, as a slice, if it was already loaded in memory.
-    fn data(&self) -> Option<&[u8]> {
-        None
+    /// Get the path, on disk, pointing to the referenced data, if there is one.
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Memory(_) | Self::Chain(_) => None,
+            Self::File(file) => Some(file.path()),
+        }
+    }
+
+    /// Get a reference to the data, if it lives in memory.
+    pub fn data(&self) -> Option<&[u8]> {
+        match self {
+            Self::Memory(buf) => Some(buf),
+            Self::Chain(_) | Self::File(_) => None,
+        }
+    }
+
+    /// Transform the source in a buffer in memory, reading the entirety of the data first if
+    /// necessary.
+    pub async fn read_all_into_vec(self) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::Memory(buf) => Ok(buf.to_vec()),
+            Self::Chain(chain) => chain.read_all_into_vec().await,
+            Self::File(file) => file.read_all_into_vec().await,
+        }
+    }
+
+    /// Get an asynchronous reader from this `AsyncSource`.
+    pub fn get_async_read(&'d self) -> BoxFuture<std::io::Result<BoxAsyncRead<'d>>> {
+        match self {
+            Self::Memory(buf) => {
+                Box::pin(async move { Ok(Box::new(futures::io::Cursor::new(buf)) as BoxAsyncRead) })
+            }
+            Self::Chain(chain) => Box::pin(async move { chain.get_async_read().await }),
+            Self::File(file) => Box::pin(async move { file.get_async_read().await }),
+        }
     }
 }
 
-impl AsyncSource for futures::io::Cursor<&[u8]> {
-    fn size(&self) -> u64 {
-        self.get_ref()
-            .len()
-            .try_into()
-            .expect("buffers larger than 2^64 are not supported")
-    }
-
-    fn data(&self) -> Option<&[u8]> {
-        Some(self.get_ref())
+impl<'d> From<Cow<'d, [u8]>> for AsyncSource<'d> {
+    fn from(value: Cow<'d, [u8]>) -> Self {
+        Self::Memory(value)
     }
 }
 
-impl AsyncSource for futures::io::Cursor<Vec<u8>> {
-    fn size(&self) -> u64 {
-        self.get_ref()
-            .len()
-            .try_into()
-            .expect("buffers larger than 2^64 are not supported")
-    }
-
-    fn data(&self) -> Option<&[u8]> {
-        Some(self.get_ref())
+impl<'d> From<&'d [u8]> for AsyncSource<'d> {
+    fn from(value: &'d [u8]) -> Self {
+        Cow::Borrowed(value).into()
     }
 }
 
-impl AsyncSource for futures::io::Cursor<Bytes> {
-    fn size(&self) -> u64 {
-        self.get_ref()
-            .len()
-            .try_into()
-            .expect("buffers larger than 2^64 are not supported")
+impl From<Vec<u8>> for AsyncSource<'_> {
+    fn from(value: Vec<u8>) -> Self {
+        Cow::<[u8]>::Owned(value).into()
     }
+}
 
-    fn data(&self) -> Option<&[u8]> {
-        Some(self.get_ref())
+impl From<Bytes> for AsyncSource<'_> {
+    fn from(value: Bytes) -> Self {
+        value.to_vec().into()
+    }
+}
+
+impl<'d> From<AsyncSourceChain<'d>> for AsyncSource<'d> {
+    fn from(value: AsyncSourceChain<'d>) -> Self {
+        Self::Chain(value)
+    }
+}
+
+impl From<AsyncFileSource> for AsyncSource<'_> {
+    fn from(value: AsyncFileSource) -> Self {
+        Self::File(value)
     }
 }

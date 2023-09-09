@@ -17,11 +17,12 @@
 //! of various storage engines behind several, distributed, layers of in-memory and on-disk local
 //! and remote caches.
 
-mod async_file_source;
 mod async_read_init;
 mod async_source;
+mod async_source_chain;
 pub(crate) mod buf_utils;
 pub mod cairn;
+pub mod filesystem;
 pub mod fragmentation;
 pub mod gorgon;
 pub mod hash_algorithm;
@@ -29,10 +30,11 @@ mod ledger;
 pub mod remote_ref;
 pub mod storage;
 
-pub use async_file_source::AsyncFileSource;
 pub use async_read_init::AsyncReadInit;
-pub use async_source::AsyncSource;
+pub use async_source::{AsyncSource, BoxAsyncRead};
+pub use async_source_chain::AsyncSourceChain;
 pub use cairn::Cairn;
+pub use filesystem::{AsyncFileSource, Filesystem};
 pub use fragmentation::FragmentationMethod;
 pub use gorgon::Gorgon;
 pub use hash_algorithm::HashAlgorithm;

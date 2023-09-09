@@ -2,10 +2,7 @@
 
 mod filesystem;
 
-use std::io::SeekFrom;
-
 pub use filesystem::FilesystemStorage;
-use futures::{AsyncRead, AsyncSeek, AsyncSeekExt};
 
 use crate::{AsyncSource, HashAlgorithm, RemoteRef};
 
@@ -35,12 +32,9 @@ pub enum Storage {
 
 impl Storage {
     /// Retrieve a value
-    pub(crate) async fn retrieve(
-        &self,
-        remote_ref: &RemoteRef,
-    ) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+    pub(crate) async fn retrieve(&self, remote_ref: &RemoteRef) -> Result<AsyncSource> {
         match self {
-            Self::Filesystem(storage) => Ok(Box::new(storage.retrieve(remote_ref).await)),
+            Self::Filesystem(storage) => Ok(storage.retrieve(remote_ref).await?.into()),
         }
     }
 
@@ -48,10 +42,14 @@ impl Storage {
     pub(crate) async fn store(
         &self,
         hash_algorithm: HashAlgorithm,
-        mut source: impl AsyncSource + AsyncSeek,
+        source: impl Into<AsyncSource<'_>>,
     ) -> Result<RemoteRef> {
-        let hash = hash_algorithm.async_hash_to_vec(&mut source).await?.into();
-        source.seek(SeekFrom::Start(0)).await?;
+        let source = source.into();
+
+        let hash = hash_algorithm
+            .async_hash_to_vec(source.get_async_read().await?)
+            .await?
+            .into();
 
         let remote_ref = RemoteRef {
             ref_size: source.size(),
@@ -72,11 +70,7 @@ impl Storage {
     ///
     /// Attempting to store a value with a non-matching hash will cause silent data corruption. Be
     /// careful and do NOT do it.
-    async fn store_unchecked(
-        &self,
-        remote_ref: &RemoteRef,
-        source: impl AsyncSource,
-    ) -> Result<()> {
+    async fn store_unchecked(&self, remote_ref: &RemoteRef, source: AsyncSource<'_>) -> Result<()> {
         match self {
             Self::Filesystem(storage) => storage.store(remote_ref, source).await,
         }

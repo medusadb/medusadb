@@ -2,11 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use async_compat::CompatExt;
-use futures::{future::BoxFuture, AsyncRead, AsyncReadExt, AsyncSeek, TryStreamExt};
+use futures::{future::BoxFuture, TryStreamExt};
 
 use crate::{
-    ledger::Ledger, storage::FilesystemStorage, AsyncFileSource, AsyncSource, Cairn,
+    ledger::Ledger, storage::FilesystemStorage, AsyncSource, AsyncSourceChain, Cairn, Filesystem,
     FragmentationMethod, HashAlgorithm, Storage,
 };
 
@@ -47,15 +46,21 @@ pub struct StoreOptions {
 pub struct Gorgon {
     hash_algorithm: HashAlgorithm,
     fragmentation_method: FragmentationMethod,
+    filesystem: Filesystem,
     storage: Storage,
 }
 
 impl Default for Gorgon {
     fn default() -> Self {
+        let filesystem = Filesystem::default();
+        let storage =
+            Storage::Filesystem(FilesystemStorage::new(filesystem.clone(), "test").unwrap());
+
         Self {
             hash_algorithm: HashAlgorithm::Blake3,
             fragmentation_method: FragmentationMethod::Fastcdc(Default::default()),
-            storage: Storage::Filesystem(FilesystemStorage::new("test").unwrap()),
+            filesystem,
+            storage,
         }
     }
 }
@@ -63,37 +68,34 @@ impl Default for Gorgon {
 impl Gorgon {
     /// Retrieve a value from a file on disk.
     pub async fn retrieve_to_file(&self, cairn: Cairn, path: impl AsRef<Path>) -> Result<()> {
-        let mut source = self.retrieve(cairn).await?;
+        let source = self.retrieve(cairn).await?;
 
-        // TODO: Reuse AsyncSource here.
-        let mut target = tokio::fs::File::create(path).await?;
-        tokio::io::copy(&mut source.compat_mut(), &mut target).await?;
-
-        Ok(())
+        self.filesystem
+            .save_source(path, source)
+            .await
+            .map_err(Into::into)
     }
 
     /// Retrieve a value.
-    pub fn retrieve(&self, cairn: Cairn) -> BoxFuture<Result<Box<dyn AsyncRead + Unpin + Send>>> {
+    pub fn retrieve(&self, cairn: Cairn) -> BoxFuture<Result<AsyncSource<'_>>> {
         Box::pin(async move {
             Ok(match cairn {
-                Cairn::SelfContained(buf) => Box::new(futures::io::Cursor::new(buf)),
+                Cairn::SelfContained(buf) => buf.into(),
                 Cairn::Ledger { cairn, .. } => {
                     let ledger_source = self.retrieve(*cairn).await?;
-                    let ledger = Ledger::async_read_from(ledger_source).await?;
+                    let ledger =
+                        Ledger::async_read_from(ledger_source.get_async_read().await?).await?;
 
                     match ledger {
                         Ledger::LinearAggregate { cairns } => {
-                            let streams = futures::future::join_all(
+                            let sources = futures::future::join_all(
                                 cairns.into_iter().map(|cairn| self.retrieve(cairn)),
                             )
                             .await
                             .into_iter()
                             .collect::<Result<Vec<_>>>()?;
 
-                            streams
-                                .into_iter()
-                                .reduce(|res, stream| Box::new(res.chain(stream)))
-                                .unwrap_or_else(|| Box::new(futures::io::empty()))
+                            AsyncSourceChain::new(sources).into()
                         }
                     }
                 }
@@ -110,7 +112,7 @@ impl Gorgon {
         path: impl Into<PathBuf>,
         options: &StoreOptions,
     ) -> Result<Cairn> {
-        let source = AsyncFileSource::open(path).await?;
+        let source = self.filesystem.load_source(path).await?;
 
         self.store(source, options).await
     }
@@ -122,16 +124,16 @@ impl Gorgon {
     /// appropriately.
     pub fn store<'s>(
         &'s self,
-        mut source: impl AsyncSource + AsyncSeek + Send + 's,
+        source: impl Into<AsyncSource<'s>>,
         options: &'s StoreOptions,
     ) -> BoxFuture<'s, Result<Cairn>> {
+        let source = source.into();
+
         Box::pin(async move {
             let ref_size = source.size();
 
             if ref_size < Cairn::MAX_SELF_CONTAINED_SIZE {
-                let mut data =
-                    vec![0; ref_size.try_into().expect("failed to convert u64 to usize")];
-                source.read_to_end(&mut data).await?;
+                let data = source.read_all_into_vec().await?;
 
                 Cairn::self_contained(data).map_err(Into::into)
             } else if !options.disable_fragmentation
@@ -139,7 +141,8 @@ impl Gorgon {
             {
                 let mut cairns =
                     Vec::with_capacity(self.fragmentation_method.fragments_count_hint(ref_size));
-                let stream = self.fragmentation_method.fragment(source);
+                let r = source.get_async_read().await?;
+                let stream = self.fragmentation_method.fragment(r);
 
                 tokio::pin!(stream);
 
@@ -150,19 +153,14 @@ impl Gorgon {
                     options.disable_fragmentation = true;
 
                     while let Some(fragment) = stream.try_next().await? {
-                        let cairn = self
-                            .store(futures::io::Cursor::new(fragment), &options)
-                            .await?;
+                        let cairn = self.store(fragment, &options).await?;
                         cairns.push(cairn);
                     }
                 }
 
                 let ledger = Ledger::LinearAggregate { cairns };
 
-                let cairn = Box::new(
-                    self.store(futures::io::Cursor::new(ledger.to_vec()), options)
-                        .await?,
-                );
+                let cairn = Box::new(self.store(ledger.to_vec(), options).await?);
 
                 Ok(Cairn::Ledger { ref_size, cairn })
             } else {
