@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use gorgondb::{gorgon::StoreOptions, Cairn};
+use gorgondb::{gorgon::StoreOptions, BlobId};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -14,7 +14,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Store a value and displays its cairn.
+    /// Store a value and displays its blob id.
     Store {
         /// The path of the file to store.
         path: PathBuf,
@@ -22,8 +22,8 @@ enum Command {
 
     /// Retrieve a value.
     Retrieve {
-        /// The cairn of the value to retrieve.
-        cairn: Cairn,
+        /// The blob id of the value to retrieve.
+        blob_id: BlobId,
 
         /// The path of the file to write locally.
         path: PathBuf,
@@ -40,11 +40,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Store { path } => {
             let options = &StoreOptions::default();
 
-            let cairn = gorgon.store_from_file(path, options).await?;
+            let blob_id = gorgon.store_from_file(path, options).await?;
 
-            println!("{cairn}");
+            println!("{blob_id}");
         }
-        Command::Retrieve { cairn, path } => gorgon.retrieve_to_file(cairn, path).await?,
+        Command::Retrieve { blob_id, path } => gorgon.retrieve_to_file(blob_id, path).await?,
     }
 
     Ok(())

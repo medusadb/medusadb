@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use futures::{future::BoxFuture, TryStreamExt};
 
 use crate::{
-    ledger::Ledger, storage::FilesystemStorage, AsyncSource, AsyncSourceChain, Cairn, Filesystem,
+    ledger::Ledger, storage::FilesystemStorage, AsyncSource, AsyncSourceChain, BlobId, Filesystem,
     FragmentationMethod, HashAlgorithm, Storage,
 };
 
@@ -16,9 +16,9 @@ pub enum Error {
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
 
-    /// A `Cairn` error occured.
-    #[error("cairn error: {0}")]
-    Cairn(#[from] crate::cairn::Error),
+    /// A `BlobId` error occured.
+    #[error("blob id error: {0}")]
+    BlobId(#[from] crate::blob_id::Error),
 
     /// A storage error occured.
     #[error("storage error: {0}")]
@@ -67,8 +67,8 @@ impl Default for Gorgon {
 
 impl Gorgon {
     /// Retrieve a value from a file on disk.
-    pub async fn retrieve_to_file(&self, cairn: Cairn, path: impl AsRef<Path>) -> Result<()> {
-        let source = self.retrieve(cairn).await?;
+    pub async fn retrieve_to_file(&self, blob_id: BlobId, path: impl AsRef<Path>) -> Result<()> {
+        let source = self.retrieve(blob_id).await?;
 
         self.filesystem
             .save_source(path, source)
@@ -77,19 +77,19 @@ impl Gorgon {
     }
 
     /// Retrieve a value.
-    pub fn retrieve(&self, cairn: Cairn) -> BoxFuture<Result<AsyncSource<'_>>> {
+    pub fn retrieve(&self, blob_id: BlobId) -> BoxFuture<Result<AsyncSource<'_>>> {
         Box::pin(async move {
-            Ok(match cairn {
-                Cairn::SelfContained(buf) => buf.into(),
-                Cairn::Ledger { cairn, .. } => {
-                    let ledger_source = self.retrieve(*cairn).await?;
+            Ok(match blob_id {
+                BlobId::SelfContained(buf) => buf.into(),
+                BlobId::Ledger { blob_id, .. } => {
+                    let ledger_source = self.retrieve(*blob_id).await?;
                     let ledger =
                         Ledger::async_read_from(ledger_source.get_async_read().await?).await?;
 
                     match ledger {
-                        Ledger::LinearAggregate { cairns } => {
+                        Ledger::LinearAggregate { blob_ids } => {
                             let sources = futures::future::join_all(
-                                cairns.into_iter().map(|cairn| self.retrieve(cairn)),
+                                blob_ids.into_iter().map(|blob_id| self.retrieve(blob_id)),
                             )
                             .await
                             .into_iter()
@@ -99,7 +99,7 @@ impl Gorgon {
                         }
                     }
                 }
-                Cairn::RemoteRef(remote_ref) => self.storage.retrieve(&remote_ref).await?,
+                BlobId::RemoteRef(remote_ref) => self.storage.retrieve(&remote_ref).await?,
             })
         })
     }
@@ -111,7 +111,7 @@ impl Gorgon {
         &self,
         path: impl Into<PathBuf>,
         options: &StoreOptions,
-    ) -> Result<Cairn> {
+    ) -> Result<BlobId> {
         let source = self.filesystem.load_source(path).await?;
 
         self.store(source, options).await
@@ -119,27 +119,27 @@ impl Gorgon {
 
     /// Store and persist a value.
     ///
-    /// Upon success, a `Cairn` describing the value is returned. Losing the resulting `Cairn`
-    /// equates to losing the value. It is the caller's responsibility to store [`Cairns`](`Cairn`)
+    /// Upon success, a `BlobId` describing the value is returned. Losing the resulting `BlobId`
+    /// equates to losing the value. It is the caller's responsibility to store [`BlobIds`](`BlobId`)
     /// appropriately.
     pub fn store<'s>(
         &'s self,
         source: impl Into<AsyncSource<'s>>,
         options: &'s StoreOptions,
-    ) -> BoxFuture<'s, Result<Cairn>> {
+    ) -> BoxFuture<'s, Result<BlobId>> {
         let source = source.into();
 
         Box::pin(async move {
             let ref_size = source.size();
 
-            if ref_size < Cairn::MAX_SELF_CONTAINED_SIZE {
+            if ref_size < BlobId::MAX_SELF_CONTAINED_SIZE {
                 let data = source.read_all_into_vec().await?;
 
-                Cairn::self_contained(data).map_err(Into::into)
+                BlobId::self_contained(data).map_err(Into::into)
             } else if !options.disable_fragmentation
                 && ref_size > self.fragmentation_method.min_size()
             {
-                let mut cairns =
+                let mut blob_ids =
                     Vec::with_capacity(self.fragmentation_method.fragments_count_hint(ref_size));
                 let r = source.get_async_read().await?;
                 let stream = self.fragmentation_method.fragment(r);
@@ -153,16 +153,16 @@ impl Gorgon {
                     options.disable_fragmentation = true;
 
                     while let Some(fragment) = stream.try_next().await? {
-                        let cairn = self.store(fragment, &options).await?;
-                        cairns.push(cairn);
+                        let blob_id = self.store(fragment, &options).await?;
+                        blob_ids.push(blob_id);
                     }
                 }
 
-                let ledger = Ledger::LinearAggregate { cairns };
+                let ledger = Ledger::LinearAggregate { blob_ids };
 
-                let cairn = Box::new(self.store(ledger.to_vec(), options).await?);
+                let blob_id = Box::new(self.store(ledger.to_vec(), options).await?);
 
-                Ok(Cairn::Ledger { ref_size, cairn })
+                Ok(BlobId::Ledger { ref_size, blob_id })
             } else {
                 self.storage
                     .store(self.hash_algorithm, source)

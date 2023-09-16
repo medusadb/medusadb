@@ -13,7 +13,7 @@ use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 
-use crate::{buf_utils, Cairn, HashAlgorithm};
+use crate::{buf_utils, BlobId, HashAlgorithm};
 
 /// An error type for [``RemoteRefs``](``RemoteRef``).
 #[derive(Debug, Error)]
@@ -28,7 +28,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// A remote-reference to a blob of data.
 ///
-/// In most case, you should not need to deal with this type, but rather with [`crate::Cairn`].
+/// In most case, you should not need to deal with this type, but rather with [`crate::BlobId`].
 ///
 /// # Handling remote-references
 ///
@@ -90,7 +90,7 @@ impl RemoteRef {
     /// Write the remote reference to the specified writer, returning the number of bytes written.
     pub fn write_to(&self, mut w: impl Write) -> std::io::Result<usize> {
         let count =
-            buf_utils::write_buffer_size(&mut w, self.ref_size, Cairn::INFO_BITS_REMOTE_REF)?
+            buf_utils::write_buffer_size(&mut w, self.ref_size, BlobId::INFO_BITS_REMOTE_REF)?
                 + 1
                 + self.hash.len();
         w.write_all(&[self.hash_algorithm.into()])?;
@@ -102,7 +102,7 @@ impl RemoteRef {
     /// Write the remote reference to the specified writer, returning the number of bytes written.
     pub async fn async_write_to(&self, mut w: impl AsyncWrite + Unpin) -> std::io::Result<usize> {
         let count =
-            buf_utils::async_write_buffer_size(&mut w, self.ref_size, Cairn::INFO_BITS_REMOTE_REF)
+            buf_utils::async_write_buffer_size(&mut w, self.ref_size, BlobId::INFO_BITS_REMOTE_REF)
                 .await?
                 + 1
                 + self.hash.len();
@@ -197,7 +197,7 @@ impl RemoteRef {
         match buf_utils::read_buffer_size(&mut r).map_err(|err| {
             std::io::Error::new(err.kind(), format!("failed to read reference size: {err}"))
         })? {
-            (ref_size, Cairn::INFO_BITS_REMOTE_REF) => Self::read_without_header_from(ref_size, r),
+            (ref_size, BlobId::INFO_BITS_REMOTE_REF) => Self::read_without_header_from(ref_size, r),
             (_, info_bits) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("invalid non-zero info bits `0x{info_bits:02x}`"),
@@ -212,7 +212,7 @@ impl RemoteRef {
             .map_err(|err| {
                 std::io::Error::new(err.kind(), format!("failed to read reference size: {err}"))
             })? {
-            (ref_size, Cairn::INFO_BITS_REMOTE_REF) => {
+            (ref_size, BlobId::INFO_BITS_REMOTE_REF) => {
                 Self::async_read_without_header_from(ref_size, r).await
             }
             (_, info_bits) => Err(std::io::Error::new(

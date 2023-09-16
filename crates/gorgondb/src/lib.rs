@@ -3,7 +3,7 @@
 //! [Gorgons](`https://en.wikipedia.org/wiki/Gorgon`) are a mythological creature than turn their
 //! victims to stone, leaving them forever in that immutable state.
 //!
-//! GorgonDB turns data into immutable blobs and generates [`identifiers`](`crate::Cairn`) for
+//! GorgonDB turns data into immutable blobs and generates [`identifiers`](`crate::BlobId`) for
 //! them.
 //!
 //! # Deduplication
@@ -20,8 +20,8 @@
 mod async_read_init;
 mod async_source;
 mod async_source_chain;
+pub mod blob_id;
 pub(crate) mod buf_utils;
-pub mod cairn;
 pub mod filesystem;
 pub mod fragmentation;
 pub mod gorgon;
@@ -33,7 +33,7 @@ pub mod storage;
 pub use async_read_init::AsyncReadInit;
 pub use async_source::{AsyncSource, BoxAsyncRead};
 pub use async_source_chain::AsyncSourceChain;
-pub use cairn::Cairn;
+pub use blob_id::BlobId;
 pub use filesystem::{AsyncFileSource, Filesystem};
 pub use fragmentation::FragmentationMethod;
 pub use gorgon::Gorgon;

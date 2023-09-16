@@ -19,49 +19,48 @@ use crate::{
     RemoteRef,
 };
 
-/// An error type for [``Cairns``](``Cairn``).
+/// An error type for [``BlobIds``](``BlobId``).
 #[derive(Debug, Error)]
 pub enum Error {
-    /// The cairn is invalid.
-    #[error("invalid cairn: {0}")]
-    InvalidCairn(String),
+    /// The blob id is invalid.
+    #[error("invalid blob id: {0}")]
+    InvalidBlobId(String),
 }
 
 /// A convenience result type.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// A [``Cairn``](https://en.wikipedia.org/wiki/Cairn) is a marker for an unalterable piece of
-/// information - or put otherwise: an identifier for an immutable blob of data in GorgonDB.
+/// A [``BlobId``] is an identifier for an immutable blob of data in GorgonDB.
 ///
-/// Cairns can be of different nature:
+/// BlobIds can be of different nature:
 ///
-/// - A self-contained ``Cairn`` contains the data itself, and is usually reserved for smaller
-/// blobs (think, 63 bytes or less). Self-contained cairns are special in that reading them is
+/// - A self-contained ``BlobId`` contains the data itself, and is usually reserved for smaller
+/// blobs (think, 63 bytes or less). Self-contained blob ids are special in that reading them is
 /// simply reading from local memory and writing them is a no-op.
-/// - A remote-ref ``Cairn`` is a direct hash of the data it points to. This is the typical way of
+/// - A remote-ref ``BlobId`` is a direct hash of the data it points to. This is the typical way of
 /// storing data in GorgonDB.
-/// - A ledger ``Cairn`` is a ``Cairn`` that points to a list of other cairns and represents big
+/// - A ledger ``BlobId`` is a ``BlobId`` that points to a list of other blob ids and represents big
 /// blobs of data separated in smaller chunks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, DeserializeFromStr, SerializeDisplay)]
-pub enum Cairn {
-    /// The ``Cairn`` contains the data directly.
+pub enum BlobId {
+    /// The ``BlobId`` contains the data directly.
     ///
     /// This variant cannot hold more than 256 bytes.
     SelfContained(Bytes),
 
-    /// The ``Cairn`` is a hash to a blob of data stored elsewhere.
+    /// The ``BlobId`` is a hash to a blob of data stored elsewhere.
     RemoteRef(RemoteRef),
 
-    /// The ``Cairn`` is an aggregation of other cairns.
+    /// The ``BlobId`` is an aggregation of other blob ids.
     Ledger {
         /// The total size of the reference value.
         ref_size: u64,
-        /// A `Cairn` that references the internal ledger data.
-        cairn: Box<Self>,
+        /// A `BlobId` that references the internal ledger data.
+        blob_id: Box<Self>,
     },
 }
 
-impl Cairn {
+impl BlobId {
     /// The maximum size of self-contained values.
     pub const MAX_SELF_CONTAINED_SIZE: u64 = 63;
 
@@ -69,12 +68,12 @@ impl Cairn {
     pub(crate) const INFO_BITS_REMOTE_REF: u8 = 0x01;
     const INFO_BITS_LEDGER: u8 = 0x02;
 
-    /// Instantiate an empty ``Cairn``.
+    /// Instantiate an empty ``BlobId``.
     pub fn empty() -> Self {
         Self::SelfContained(Default::default())
     }
 
-    /// Instantiate a new self-contained ``Cairn`` referencing the specified data.
+    /// Instantiate a new self-contained ``BlobId`` referencing the specified data.
     ///
     /// If the data exceed 63 bytes, an error is returned.
     ///
@@ -83,8 +82,8 @@ impl Cairn {
         let buf = buf.into();
 
         if buf.len() > 0x3f {
-            Err(Error::InvalidCairn(format!(
-                "self-contained cairn can never exceed {} bytes",
+            Err(Error::InvalidBlobId(format!(
+                "self-contained blob id can never exceed {} bytes",
                 0x3f,
             )))
         } else {
@@ -92,7 +91,7 @@ impl Cairn {
         }
     }
 
-    /// Get the size of the data referenced by this cairn.
+    /// Get the size of the data referenced by this blob id.
     pub fn size(&self) -> u64 {
         match self {
             Self::SelfContained(raw) => raw
@@ -116,13 +115,13 @@ impl Cairn {
                     + raw.len()
             }
             Self::RemoteRef(remote_ref) => remote_ref.buf_len(),
-            Self::Ledger { ref_size, cairn } => {
-                buf_utils::buffer_size_len(*ref_size) as usize + cairn.buf_len()
+            Self::Ledger { ref_size, blob_id } => {
+                buf_utils::buffer_size_len(*ref_size) as usize + blob_id.buf_len()
             }
         }
     }
 
-    /// Write the cairn to the specified writer, returning the number of bytes written.
+    /// Write the blob id to the specified writer, returning the number of bytes written.
     pub fn write_to(&self, mut w: impl Write) -> std::io::Result<usize> {
         match self {
             Self::SelfContained(raw) => {
@@ -138,15 +137,15 @@ impl Cairn {
                 Ok(cnt + raw.len())
             }
             Self::RemoteRef(remote_ref) => remote_ref.write_to(w),
-            Self::Ledger { ref_size, cairn } => {
+            Self::Ledger { ref_size, blob_id } => {
                 let cnt = buf_utils::write_buffer_size(&mut w, *ref_size, Self::INFO_BITS_LEDGER)?;
 
-                Ok(cairn.write_to(w)? + cnt)
+                Ok(blob_id.write_to(w)? + cnt)
             }
         }
     }
 
-    /// Write the cairn to the specified writer, returning the number of bytes written.
+    /// Write the blob id to the specified writer, returning the number of bytes written.
     pub fn async_write_to<'w>(
         &'w self,
         mut w: impl AsyncWrite + Unpin + 'w,
@@ -167,7 +166,7 @@ impl Cairn {
                     Ok(cnt + raw.len())
                 }
                 Self::RemoteRef(remote_ref) => remote_ref.async_write_to(w).await,
-                Self::Ledger { ref_size, cairn } => {
+                Self::Ledger { ref_size, blob_id } => {
                     let cnt = buf_utils::async_write_buffer_size(
                         &mut w,
                         *ref_size,
@@ -175,13 +174,13 @@ impl Cairn {
                     )
                     .await?;
 
-                    Ok(cairn.async_write_to(w).await? + cnt)
+                    Ok(blob_id.async_write_to(w).await? + cnt)
                 }
             }
         })
     }
 
-    /// Return a vector of bytes representing the cairn in a non human-friendly way.
+    /// Return a vector of bytes representing the blob id in a non human-friendly way.
     pub fn to_vec(&self) -> Vec<u8> {
         let mut res = Vec::with_capacity(self.buf_len());
 
@@ -191,7 +190,7 @@ impl Cairn {
         res
     }
 
-    /// Read a `Cairn` from the specified reader.
+    /// Read a `BlobId` from the specified reader.
     pub fn read_from(mut r: impl Read) -> std::io::Result<Self> {
         match buf_utils::read_buffer_size_len(&mut r).map_err(|err| {
             std::io::Error::new(err.kind(), format!("failed to read reference size: {err}"))
@@ -211,18 +210,18 @@ impl Cairn {
             }
             (size_len, Self::INFO_BITS_LEDGER) => {
                 let ref_size = read_buffer_size_with_size_len(&mut r, size_len)?;
-                let cairn = Box::new(Cairn::read_from(r)?);
+                let blob_id = Box::new(BlobId::read_from(r)?);
 
-                Ok(Self::Ledger { ref_size, cairn })
+                Ok(Self::Ledger { ref_size, blob_id })
             }
             (_, info_bits) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("unexpected info bits `{info_bits:02x}` for cairn"),
+                format!("unexpected info bits `{info_bits:02x}` for blob id"),
             )),
         }
     }
 
-    /// Read a `Cairn` from the specified async reader.
+    /// Read a `BlobId` from the specified async reader.
     pub fn async_read_from<'r>(
         mut r: impl AsyncRead + Unpin + Send + 'r,
     ) -> Pin<Box<dyn Future<Output = std::io::Result<Self>> + Send + 'r>> {
@@ -251,58 +250,58 @@ impl Cairn {
                 (size_len, Self::INFO_BITS_LEDGER) => {
                     let ref_size =
                         buf_utils::async_read_buffer_size_with_size_len(&mut r, size_len).await?;
-                    let cairn = Box::new(Cairn::async_read_from(r).await?);
+                    let blob_id = Box::new(BlobId::async_read_from(r).await?);
 
-                    Ok(Self::Ledger { ref_size, cairn })
+                    Ok(Self::Ledger { ref_size, blob_id })
                 }
                 (_, info_bits) => Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("unexpected info bits `{info_bits:02x}` for cairn"),
+                    format!("unexpected info bits `{info_bits:02x}` for blob id"),
                 )),
             }
         })
     }
 
-    /// Read the `Cairn` from the specified slice.
+    /// Read the `BlobId` from the specified slice.
     ///
     /// If the slice contains extra data, an error is returned.
     pub fn from_slice(buf: &[u8]) -> Result<Self> {
         let mut r = std::io::Cursor::new(buf);
 
-        let res = Self::read_from(&mut r).map_err(|err| Error::InvalidCairn(err.to_string()))?;
+        let res = Self::read_from(&mut r).map_err(|err| Error::InvalidBlobId(err.to_string()))?;
 
         match r.read_u8() {
-            Ok(b) => Err(Error::InvalidCairn(format!(
-                "unexpected byte after cairn: 0x{b:02x}"
+            Ok(b) => Err(Error::InvalidBlobId(format!(
+                "unexpected byte after blob id: 0x{b:02x}"
             ))),
             Err(err) if err.kind() != std::io::ErrorKind::UnexpectedEof => Err(
-                Error::InvalidCairn(format!("unexpected error after cairn: {err}")),
+                Error::InvalidBlobId(format!("unexpected error after blob id: {err}")),
             ),
             Err(_) => Ok(res),
         }
     }
 }
 
-impl Display for Cairn {
+impl Display for BlobId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&base64::engine::general_purpose::URL_SAFE.encode(self.to_vec()))
     }
 }
 
-impl FromStr for Cairn {
+impl FromStr for BlobId {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let raw = base64::engine::general_purpose::URL_SAFE
             .decode(s)
-            .map_err(|err| Error::InvalidCairn(format!("failed to parse base64 string: {err}")))?;
+            .map_err(|err| Error::InvalidBlobId(format!("failed to parse base64 string: {err}")))?;
 
         Self::read_from(std::io::Cursor::new(raw))
-            .map_err(|err| Error::InvalidCairn(err.to_string()))
+            .map_err(|err| Error::InvalidBlobId(err.to_string()))
     }
 }
 
-impl From<RemoteRef> for Cairn {
+impl From<RemoteRef> for BlobId {
     fn from(value: RemoteRef) -> Self {
         Self::RemoteRef(value)
     }
@@ -315,90 +314,90 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_cairn_empty() {
+    fn test_blob_id_empty() {
         let expected = "AA=="; // Contains `vec[]`.
-        let cairn = Cairn::empty();
-        assert_eq!(cairn, Cairn::SelfContained(Bytes::new()));
-        assert_eq!(cairn.to_string(), expected);
-        assert_eq!(cairn.size(), 0);
+        let blob_id = BlobId::empty();
+        assert_eq!(blob_id, BlobId::SelfContained(Bytes::new()));
+        assert_eq!(blob_id.to_string(), expected);
+        assert_eq!(blob_id.size(), 0);
 
-        let cairn: Cairn = serde_json::from_value(json!(expected)).unwrap();
-        assert_eq!(serde_json::to_value(cairn).unwrap(), json!(expected));
+        let blob_id: BlobId = serde_json::from_value(json!(expected)).unwrap();
+        assert_eq!(serde_json::to_value(blob_id).unwrap(), json!(expected));
     }
 
     #[test]
-    fn test_cairn_self_contained() {
+    fn test_blob_id_self_contained() {
         let expected = "AQE="; // Contains `vec[0x01]`.
-        let cairn: Cairn = expected.parse().unwrap();
-        assert_eq!(cairn, Cairn::self_contained(vec![0x01]).unwrap());
-        assert_eq!(cairn.to_string(), expected);
-        assert_eq!(cairn.size(), 1);
+        let blob_id: BlobId = expected.parse().unwrap();
+        assert_eq!(blob_id, BlobId::self_contained(vec![0x01]).unwrap());
+        assert_eq!(blob_id.to_string(), expected);
+        assert_eq!(blob_id.size(), 1);
 
-        let cairn: Cairn = serde_json::from_value(json!(expected)).unwrap();
-        assert_eq!(serde_json::to_value(cairn).unwrap(), json!(expected));
+        let blob_id: BlobId = serde_json::from_value(json!(expected)).unwrap();
+        assert_eq!(serde_json::to_value(blob_id).unwrap(), json!(expected));
     }
 
     #[test]
-    fn test_cairn_remote_ref() {
+    fn test_blob_id_remote_ref() {
         let expected = "QQEBSPxyH7vBcuCSX6J68Wcd4iW6knE0gCmYsQoVaKGIZSs=";
-        let cairn: Cairn = expected.parse().unwrap();
-        assert!(matches!(cairn, Cairn::RemoteRef(_)));
-        assert_eq!(cairn.to_string(), expected);
-        assert_eq!(cairn.size(), 1);
+        let blob_id: BlobId = expected.parse().unwrap();
+        assert!(matches!(blob_id, BlobId::RemoteRef(_)));
+        assert_eq!(blob_id.to_string(), expected);
+        assert_eq!(blob_id.size(), 1);
 
-        let cairn: Cairn = serde_json::from_value(json!(expected)).unwrap();
-        assert_eq!(serde_json::to_value(cairn).unwrap(), json!(expected));
+        let blob_id: BlobId = serde_json::from_value(json!(expected)).unwrap();
+        assert_eq!(serde_json::to_value(blob_id).unwrap(), json!(expected));
     }
 
     #[test]
-    fn test_cairn_ledger() {
-        let first = Cairn::self_contained(vec![0x01]).unwrap();
-        let second = Cairn::self_contained(vec![0x02]).unwrap();
+    fn test_blob_id_ledger() {
+        let first = BlobId::self_contained(vec![0x01]).unwrap();
+        let second = BlobId::self_contained(vec![0x02]).unwrap();
 
         let mut data = Vec::with_capacity(first.buf_len() + second.buf_len());
         first.write_to(&mut data).unwrap();
         second.write_to(&mut data).unwrap();
-        let inner = Cairn::self_contained(data).unwrap();
+        let inner = BlobId::self_contained(data).unwrap();
 
         // [0x81, 0x02, 0x04, 0x01, 0x01, 0x01, 0x02]
         //  ^     ^     ^     ^           ^
-        //  |     |     |     |           \- The `second` self-contained cairn.
+        //  |     |     |     |           \- The `second` self-contained blob id.
         //  |     |     |     |
-        //  |     |     |     \- The `first` self-contained cairn.
+        //  |     |     |     \- The `first` self-contained blob id.
         //  |     |     |
-        //  |     |     \- The `inner` cairn that contains, as its data, two self-contained
-        //  |     |        cairns.
+        //  |     |     \- The `inner` blob id that contains, as its data, two self-contained
+        //  |     |        blob ids.
         //  |     |
         //  |     \- The encoded size of the aggregated data: that's 1 + 1 = 2.
         //  |
         //  \- The ledger info bit (0x03 << 6) followed by the size of the size (1).
         let expected = "gQIEAQEBAg==";
-        let cairn: Cairn = expected.parse().unwrap();
+        let blob_id: BlobId = expected.parse().unwrap();
         assert_eq!(
-            cairn,
-            Cairn::Ledger {
+            blob_id,
+            BlobId::Ledger {
                 ref_size: 2,
-                cairn: Box::new(inner),
+                blob_id: Box::new(inner),
             },
         );
-        assert_eq!(cairn.to_string(), expected);
-        assert_eq!(cairn.size(), 2);
+        assert_eq!(blob_id.to_string(), expected);
+        assert_eq!(blob_id.size(), 2);
 
-        let cairn: Cairn = serde_json::from_value(json!(expected)).unwrap();
-        assert_eq!(serde_json::to_value(cairn).unwrap(), json!(expected));
+        let blob_id: BlobId = serde_json::from_value(json!(expected)).unwrap();
+        assert_eq!(serde_json::to_value(blob_id).unwrap(), json!(expected));
     }
 
     #[tokio::test]
-    async fn test_cairn_async() {
-        let expected: Cairn = "AQE=".parse().unwrap();
+    async fn test_blob_id_async() {
+        let expected: BlobId = "AQE=".parse().unwrap();
         let buf = expected.to_vec();
         let r = futures::io::Cursor::new(&buf);
 
-        let cairn = Cairn::async_read_from(r).await.unwrap();
-        assert_eq!(cairn, expected);
+        let blob_id = BlobId::async_read_from(r).await.unwrap();
+        assert_eq!(blob_id, expected);
 
         let mut res = Vec::default();
-        cairn.async_write_to(&mut res).await.unwrap();
+        blob_id.async_write_to(&mut res).await.unwrap();
 
         assert_eq!(res, buf);
     }

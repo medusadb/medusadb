@@ -3,16 +3,16 @@ use std::io::{Read, Write};
 use byteorder::{ReadBytesExt, WriteBytesExt};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::{buf_utils, Cairn};
+use crate::{buf_utils, BlobId};
 
 /// A `Ledger` is the definition for a blob of data, formed by other blobs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ledger {
     /// A linear aggregate of multiple blobs.
     LinearAggregate {
-        /// The cairns for each blob of data that makes up this `Ledger`, in order.
+        /// The blob ids for each blob of data that makes up this `Ledger`, in order.
         ///
-        cairns: Vec<Cairn>,
+        blob_ids: Vec<BlobId>,
     },
 }
 
@@ -22,8 +22,11 @@ impl Ledger {
     /// Get the size of the resulting buffer when calling `write_to`.
     pub fn buf_len(&self) -> usize {
         match self {
-            Self::LinearAggregate { cairns } => {
-                1 + cairns.iter().map(|cairn| cairn.buf_len()).sum::<usize>()
+            Self::LinearAggregate { blob_ids } => {
+                1 + blob_ids
+                    .iter()
+                    .map(|blob_id| blob_id.buf_len())
+                    .sum::<usize>()
             }
         }
     }
@@ -32,7 +35,7 @@ impl Ledger {
     pub fn read_from(mut r: impl Read) -> std::io::Result<Self> {
         match r.read_u8()? {
             Self::LINEAR_AGGREGATE => {
-                let (cairns_count, info_bits) = buf_utils::read_buffer_size(&mut r)?;
+                let (blob_ids_count, info_bits) = buf_utils::read_buffer_size(&mut r)?;
 
                 if info_bits != 0 {
                     return Err(std::io::Error::new(
@@ -41,18 +44,18 @@ impl Ledger {
                     );
                 }
 
-                let mut cairns = Vec::with_capacity(
-                    cairns_count
+                let mut blob_ids = Vec::with_capacity(
+                    blob_ids_count
                         .try_into()
                         .expect("failed to convert u64 to usize"),
                 );
 
-                for _ in 0..cairns_count {
-                    let cairn = Cairn::read_from(&mut r)?;
-                    cairns.push(cairn);
+                for _ in 0..blob_ids_count {
+                    let blob_id = BlobId::read_from(&mut r)?;
+                    blob_ids.push(blob_id);
                 }
 
-                Ok(Self::LinearAggregate { cairns })
+                Ok(Self::LinearAggregate { blob_ids })
             }
             x => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -68,7 +71,7 @@ impl Ledger {
 
         match buf[0] {
             Self::LINEAR_AGGREGATE => {
-                let (cairns_count, info_bits) = buf_utils::async_read_buffer_size(&mut r).await?;
+                let (blob_ids_count, info_bits) = buf_utils::async_read_buffer_size(&mut r).await?;
 
                 if info_bits != 0 {
                     return Err(std::io::Error::new(
@@ -77,18 +80,18 @@ impl Ledger {
                     );
                 }
 
-                let mut cairns = Vec::with_capacity(
-                    cairns_count
+                let mut blob_ids = Vec::with_capacity(
+                    blob_ids_count
                         .try_into()
                         .expect("failed to convert u64 to usize"),
                 );
 
-                for _ in 0..cairns_count {
-                    let cairn = Cairn::async_read_from(&mut r).await?;
-                    cairns.push(cairn);
+                for _ in 0..blob_ids_count {
+                    let blob_id = BlobId::async_read_from(&mut r).await?;
+                    blob_ids.push(blob_id);
                 }
 
-                Ok(Self::LinearAggregate { cairns })
+                Ok(Self::LinearAggregate { blob_ids })
             }
             x => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -100,22 +103,22 @@ impl Ledger {
     /// Write the ledger to the specified writer.
     pub fn write_to(&self, mut w: impl Write) -> std::io::Result<usize> {
         match self {
-            Self::LinearAggregate { cairns } => {
+            Self::LinearAggregate { blob_ids } => {
                 let mut written = 1;
 
                 w.write_u8(Self::LINEAR_AGGREGATE)?;
 
                 written += buf_utils::write_buffer_size(
                     &mut w,
-                    cairns
+                    blob_ids
                         .len()
                         .try_into()
                         .expect("failed to convert usize to u64"),
                     0x00,
                 )?;
 
-                for cairn in cairns {
-                    written += cairn.write_to(&mut w)?;
+                for blob_id in blob_ids {
+                    written += blob_id.write_to(&mut w)?;
                 }
 
                 Ok(written)
@@ -126,14 +129,14 @@ impl Ledger {
     /// Write the ledger to the specified writer.
     pub async fn async_write_to(&self, mut w: impl AsyncWrite + Unpin) -> std::io::Result<usize> {
         match self {
-            Self::LinearAggregate { cairns } => {
+            Self::LinearAggregate { blob_ids } => {
                 let mut written = 1;
 
                 w.write_all(&[Self::LINEAR_AGGREGATE]).await?;
 
                 written += buf_utils::async_write_buffer_size(
                     &mut w,
-                    cairns
+                    blob_ids
                         .len()
                         .try_into()
                         .expect("failed to convert usize to u64"),
@@ -141,8 +144,8 @@ impl Ledger {
                 )
                 .await?;
 
-                for cairn in cairns {
-                    written += cairn.async_write_to(&mut w).await?;
+                for blob_id in blob_ids {
+                    written += blob_id.async_write_to(&mut w).await?;
                 }
 
                 Ok(written)
@@ -169,18 +172,18 @@ mod tests {
     async fn test_ledger() {
         let expected = vec![0, 1, 2, 2, 1, 2, 2, 3, 4];
         //                  ^  ^     ^        ^
-        //                  |  |     |        \- Second cairn.
+        //                  |  |     |        \- Second blob id.
         //                  |  |     |
-        //                  |  |     \- First cairn.
+        //                  |  |     \- First blob id.
         //                  |  |
-        //                  |  \- Number of cairns in the ledger, with prefix.
+        //                  |  \- Number of blob ids in the ledger, with prefix.
         //                  |
         //                  \- Type of ledger (linear aggregated).
 
         let ledger = Ledger::LinearAggregate {
-            cairns: vec![
-                Cairn::self_contained(vec![0x01, 0x02]).unwrap(),
-                Cairn::self_contained(vec![0x03, 0x04]).unwrap(),
+            blob_ids: vec![
+                BlobId::self_contained(vec![0x01, 0x02]).unwrap(),
+                BlobId::self_contained(vec![0x03, 0x04]).unwrap(),
             ],
         };
 
