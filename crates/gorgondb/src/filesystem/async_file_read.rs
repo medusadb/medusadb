@@ -1,26 +1,13 @@
-use std::{path::Path, task::Poll};
+use std::path::Path;
 
 use async_compat::{Compat, CompatExt};
 use fs4::tokio::AsyncFileExt;
-use futures::AsyncRead;
-use pin_project::pin_project;
 use tokio::sync::OwnedSemaphorePermit;
 
-/// An `AsyncRead` that hold a semaphore permit to a file.
-#[pin_project(project = FilesystemAsyncReadImpl)]
-pub enum AsyncFileRead {
-    /// The file is being read.
-    Reading {
-        /// The semaphore permit.
-        permit: OwnedSemaphorePermit,
+use crate::AsyncPermitRead;
 
-        /// The inner file handle.
-        #[pin]
-        inner: Compat<tokio::fs::File>,
-    },
-    /// The file has been read.
-    Done,
-}
+/// An `AsyncRead` that holds a semaphore permit to a file.
+pub type AsyncFileRead = AsyncPermitRead<Compat<tokio::fs::File>>;
 
 impl AsyncFileRead {
     /// Open a file from its path and borrowing the specified permit.
@@ -52,27 +39,5 @@ impl AsyncFileRead {
         let inner = file.compat();
 
         Ok(Self::Reading { permit, inner })
-    }
-}
-
-impl AsyncRead for AsyncFileRead {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut [u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        loop {
-            match self.as_mut().project() {
-                FilesystemAsyncReadImpl::Reading { inner, .. } => match inner.poll_read(cx, buf) {
-                    Poll::Ready(Ok(size)) if size == 0 => {}
-                    res => return res,
-                },
-                FilesystemAsyncReadImpl::Done => return Poll::Ready(Ok(0)),
-            };
-
-            // We are done reading: release the inner stream and the permit right away in case
-            // the instance is kept around.
-            *self.as_mut() = Self::Done;
-        }
     }
 }

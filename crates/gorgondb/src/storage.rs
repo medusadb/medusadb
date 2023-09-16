@@ -1,7 +1,13 @@
 //! Low-level remote reference types and implementations.
 
+#[cfg(feature = "aws")]
+mod aws;
 mod filesystem;
 
+#[cfg(feature = "aws")]
+pub use aws::{
+    AsyncAwsS3Source, AsyncAwsSource, AwsStorage, Error as AwsError, Result as AwsResult,
+};
 pub use filesystem::FilesystemStorage;
 
 use crate::{AsyncSource, HashAlgorithm, RemoteRef};
@@ -16,6 +22,11 @@ pub enum Error {
     /// Data corruption was detected.
     #[error("data corruption: {0}")]
     DataCorruption(String),
+
+    /// An AWS error.
+    #[cfg(feature = "aws")]
+    #[error("aws: {0}")]
+    Aws(#[from] AwsError),
 }
 
 /// A convenience result type.
@@ -28,6 +39,10 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Storage {
     /// Store files on the file-system.
     Filesystem(FilesystemStorage),
+
+    /// Store blobs in AWS S3 and DynamoDB.
+    #[cfg(feature = "aws")]
+    Aws(aws::AwsStorage),
 }
 
 impl Storage {
@@ -35,6 +50,8 @@ impl Storage {
     pub(crate) async fn retrieve(&self, remote_ref: &RemoteRef) -> Result<AsyncSource> {
         match self {
             Self::Filesystem(storage) => Ok(storage.retrieve(remote_ref).await?.into()),
+            #[cfg(feature = "aws")]
+            Self::Aws(storage) => Ok(storage.retrieve(remote_ref).await?.into()),
         }
     }
 
@@ -72,7 +89,11 @@ impl Storage {
     /// careful and do NOT do it.
     async fn store_unchecked(&self, remote_ref: &RemoteRef, source: AsyncSource<'_>) -> Result<()> {
         match self {
-            Self::Filesystem(storage) => storage.store(remote_ref, source).await,
+            Self::Filesystem(storage) => storage.store(remote_ref, source).await?,
+            #[cfg(feature = "aws")]
+            Self::Aws(storage) => storage.store(remote_ref, source).await?,
         }
+
+        Ok(())
     }
 }

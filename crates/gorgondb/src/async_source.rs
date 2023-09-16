@@ -12,10 +12,16 @@ pub type BoxAsyncRead<'s> = Box<dyn AsyncRead + Send + Unpin + 's>;
 pub enum AsyncSource<'d> {
     /// The source is a buffer in memory, either owned or borrowed.
     Memory(Cow<'d, [u8]>),
+
     /// The source is a chain of `AsyncSource`.
     Chain(AsyncSourceChain<'d>),
+
     /// The source is a file on disk.
     File(AsyncFileSource),
+
+    /// The source is AWS.
+    #[cfg(feature = "aws")]
+    Aws(crate::storage::AsyncAwsSource),
 }
 
 impl<'d> AsyncSource<'d> {
@@ -25,6 +31,7 @@ impl<'d> AsyncSource<'d> {
             Self::Memory(buf) => buf.len().try_into().expect("buffer size should fit a u64"),
             Self::Chain(chain) => chain.size(),
             Self::File(file) => file.size(),
+            Self::Aws(source) => source.size(),
         }
     }
 
@@ -33,6 +40,8 @@ impl<'d> AsyncSource<'d> {
         match self {
             Self::Memory(_) | Self::Chain(_) => None,
             Self::File(file) => Some(file.path()),
+            #[cfg(feature = "aws")]
+            Self::Aws(_) => None,
         }
     }
 
@@ -41,6 +50,8 @@ impl<'d> AsyncSource<'d> {
         match self {
             Self::Memory(buf) => Some(buf),
             Self::Chain(_) | Self::File(_) => None,
+            #[cfg(feature = "aws")]
+            Self::Aws(source) => source.data(),
         }
     }
 
@@ -51,6 +62,8 @@ impl<'d> AsyncSource<'d> {
             Self::Memory(buf) => Ok(buf.to_vec()),
             Self::Chain(chain) => chain.read_all_into_vec().await,
             Self::File(file) => file.read_all_into_vec().await,
+            #[cfg(feature = "aws")]
+            Self::Aws(source) => source.read_all_into_vec().await,
         }
     }
 
@@ -62,6 +75,8 @@ impl<'d> AsyncSource<'d> {
             }
             Self::Chain(chain) => Box::pin(async move { chain.get_async_read().await }),
             Self::File(file) => Box::pin(async move { file.get_async_read().await }),
+            #[cfg(feature = "aws")]
+            Self::Aws(source) => Box::pin(async move { source.get_async_read().await }),
         }
     }
 }
@@ -99,5 +114,12 @@ impl<'d> From<AsyncSourceChain<'d>> for AsyncSource<'d> {
 impl From<AsyncFileSource> for AsyncSource<'_> {
     fn from(value: AsyncFileSource) -> Self {
         Self::File(value)
+    }
+}
+
+#[cfg(feature = "aws")]
+impl From<crate::storage::AsyncAwsSource> for AsyncSource<'_> {
+    fn from(value: crate::storage::AsyncAwsSource) -> Self {
+        Self::Aws(value)
     }
 }

@@ -6,8 +6,6 @@ use hex::ToHex;
 
 use crate::{filesystem::AsyncFileSource, AsyncSource, Filesystem, RemoteRef};
 
-use super::Result;
-
 /// A storage that stores value on disk.
 #[derive(Debug, Clone)]
 pub struct FilesystemStorage {
@@ -39,7 +37,7 @@ impl FilesystemStorage {
         &self,
         remote_ref: &RemoteRef,
         source: impl Into<AsyncSource<'_>>,
-    ) -> Result<()> {
+    ) -> std::io::Result<()> {
         let path = self.get_path(remote_ref);
 
         if tokio::fs::try_exists(&path).await.map_err(|err| {

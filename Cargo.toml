@@ -18,6 +18,9 @@ medusadb = { path = "crates/medusadb" }
 
 anyhow = "1.0.75"
 async-compat = "0.2.1"
+aws-config = "0.56.1"
+aws-sdk-s3 = "0.30.0"
+aws-sdk-dynamodb = "0.30.0"
 base64 = "0.21.3"
 base85 = "2.0.0"
 blake3 = "1.4.1"
@@ -28,6 +31,8 @@ fastcdc = {version = "3.1", features = ["futures"]}
 futures = "0.3.28"
 fs4 = { version = "0.6", features = ["tokio-async"] }
 hex = "0.4.3"
+http = "0.2.9"
+num-integer = { version = "0.1.45", features = ["default", "i128"] }
 rmp-serde = "1.1.2"
 pin-project = "1"
 reflink = "0.1.3"
