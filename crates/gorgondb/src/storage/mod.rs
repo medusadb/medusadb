@@ -6,17 +6,18 @@ mod filesystem;
 
 #[cfg(feature = "aws")]
 pub use aws::{
-    AsyncAwsS3Source, AsyncAwsSource, AwsStorage, Error as AwsError, Result as AwsResult,
+    AsyncSource as AwsAsyncSource, AwsStorage, Error as AwsError, Result as AwsResult,
+    S3AsyncSource as AwsS3AsyncSource,
 };
 pub use filesystem::FilesystemStorage;
 
-use crate::{AsyncSource, HashAlgorithm, RemoteRef};
+use crate::{HashAlgorithm, RemoteRef};
 
 /// An error type for storage implementations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// An I/O error occured.
-    #[error("I/O: {0}")]
+    #[error("I/O error")]
     IO(#[from] std::io::Error),
 
     /// Data corruption was detected.
@@ -25,7 +26,7 @@ pub enum Error {
 
     /// An AWS error.
     #[cfg(feature = "aws")]
-    #[error("aws: {0}")]
+    #[error("AWS operation failed")]
     Aws(#[from] AwsError),
 }
 
@@ -47,7 +48,7 @@ pub enum Storage {
 
 impl Storage {
     /// Retrieve a value
-    pub(crate) async fn retrieve(&self, remote_ref: &RemoteRef) -> Result<AsyncSource> {
+    pub(crate) async fn retrieve(&self, remote_ref: &RemoteRef) -> Result<crate::AsyncSource> {
         match self {
             Self::Filesystem(storage) => Ok(storage.retrieve(remote_ref).await?.into()),
             #[cfg(feature = "aws")]
@@ -59,7 +60,7 @@ impl Storage {
     pub(crate) async fn store(
         &self,
         hash_algorithm: HashAlgorithm,
-        source: impl Into<AsyncSource<'_>>,
+        source: impl Into<crate::AsyncSource<'_>>,
     ) -> Result<RemoteRef> {
         let source = source.into();
 
@@ -87,7 +88,11 @@ impl Storage {
     ///
     /// Attempting to store a value with a non-matching hash will cause silent data corruption. Be
     /// careful and do NOT do it.
-    async fn store_unchecked(&self, remote_ref: &RemoteRef, source: AsyncSource<'_>) -> Result<()> {
+    async fn store_unchecked(
+        &self,
+        remote_ref: &RemoteRef,
+        source: crate::AsyncSource<'_>,
+    ) -> Result<()> {
         match self {
             Self::Filesystem(storage) => storage.store(remote_ref, source).await?,
             #[cfg(feature = "aws")]

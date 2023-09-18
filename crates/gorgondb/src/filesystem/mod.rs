@@ -17,7 +17,10 @@ pub use async_file_source::AsyncFileSource;
 
 use crate::AsyncSource;
 
-/// A storage that stores value on disk.
+/// An interface to interact with the filesystem.
+///
+/// It's main responsibility is ensuring that the system never opens too many file descriptors at
+/// once, which is likely to happen when using big ledgers blobs.
 #[derive(Debug, Clone)]
 pub struct Filesystem {
     semaphore: Arc<tokio::sync::Semaphore>,

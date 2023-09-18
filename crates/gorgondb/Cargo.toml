@@ -21,7 +21,7 @@ path = "src/bin/cli.rs"
 [features]
 default = ["aws", "cli"]
 aws = ["dep:aws-sdk-s3", "dep:aws-sdk-dynamodb"]
-cli = ["dep:anyhow", "dep:clap"]
+cli = ["dep:anyhow", "dep:clap", "dep:tracing-subscriber"]
 
 [dependencies]
 anyhow = { workspace = true, optional = true }
@@ -39,6 +39,7 @@ futures.workspace = true
 fs4.workspace = true
 hex.workspace = true
 http.workspace = true
+humansize.workspace = true
 num-integer.workspace = true
 reflink.workspace = true
 rmp-serde.workspace = true
@@ -49,6 +50,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
+tracing-subscriber = { workspace = true, optional = true}
 
 [dev-dependencies]
 serde_json.workspace = true

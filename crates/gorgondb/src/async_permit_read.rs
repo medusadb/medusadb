@@ -9,6 +9,9 @@ use tokio::sync::OwnedSemaphorePermit;
 pub enum AsyncPermitRead<Inner> {
     /// The file is being read.
     Reading {
+        /// The name of the reader, for debugging purposes.
+        name: String,
+
         /// The semaphore permit.
         permit: OwnedSemaphorePermit,
 
@@ -22,8 +25,16 @@ pub enum AsyncPermitRead<Inner> {
 
 impl<Inner> AsyncPermitRead<Inner> {
     /// Instantiate a new ``AsyncPermitRead``.
-    pub fn new(permit: OwnedSemaphorePermit, inner: Inner) -> Self {
-        Self::Reading { permit, inner }
+    pub fn new(name: impl Into<String>, permit: OwnedSemaphorePermit, inner: Inner) -> Self {
+        let name = name.into();
+
+        tracing::debug!("Acquired permit for async reader `{name}`.");
+
+        Self::Reading {
+            name,
+            permit,
+            inner,
+        }
     }
 }
 
@@ -35,10 +46,34 @@ impl<Inner: AsyncRead + Unpin> AsyncRead for AsyncPermitRead<Inner> {
     ) -> std::task::Poll<std::io::Result<usize>> {
         loop {
             match self.as_mut().project() {
-                AsyncPermitReadImpl::Reading { inner, .. } => match inner.poll_read(cx, buf) {
-                    Poll::Ready(Ok(size)) if size == 0 => {}
-                    res => return res,
-                },
+                AsyncPermitReadImpl::Reading { name, inner, .. } => {
+                    match inner.poll_read(cx, buf) {
+                        Poll::Ready(Ok(size)) if size == 0 => {
+                            tracing::debug!(
+                                "Async reader `{name}` is now done reading: returning permit."
+                            );
+                        }
+                        Poll::Ready(Ok(cnt)) => {
+                            tracing::trace!(
+                                "Read polling on async reader `{name}` yielded {cnt} bytes"
+                            );
+
+                            return Poll::Ready(Ok(cnt));
+                        }
+                        Poll::Ready(Err(err)) => {
+                            tracing::trace!(
+                                "Read polling on async reader `{name}` yielded an error: {err}"
+                            );
+
+                            return Poll::Ready(Err(err));
+                        }
+                        Poll::Pending => {
+                            tracing::trace!("Read polling on async reader `{name}` is pending...");
+
+                            return Poll::Pending;
+                        }
+                    }
+                }
                 AsyncPermitReadImpl::Done => return Poll::Ready(Ok(0)),
             };
 

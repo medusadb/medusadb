@@ -18,6 +18,7 @@
 //! and remote caches.
 
 mod async_permit_read;
+mod async_read_failure;
 mod async_read_init;
 mod async_source;
 mod async_source_chain;
@@ -32,6 +33,7 @@ pub mod remote_ref;
 pub mod storage;
 
 pub use async_permit_read::AsyncPermitRead;
+pub use async_read_failure::AsyncReadFailure;
 pub use async_read_init::AsyncReadInit;
 pub use async_source::{AsyncSource, BoxAsyncRead};
 pub use async_source_chain::AsyncSourceChain;

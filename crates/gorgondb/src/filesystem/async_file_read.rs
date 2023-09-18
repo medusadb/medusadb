@@ -16,28 +16,23 @@ impl AsyncFileRead {
         path: impl AsRef<Path>,
     ) -> std::io::Result<Self> {
         let path = path.as_ref();
+        let name = format!("file://{}", path.display());
 
         let file = tokio::fs::File::options()
             .read(true)
             .open(&path)
             .await
             .map_err(|err| {
-                std::io::Error::new(
-                    err.kind(),
-                    format!("failed to open `{}`: {err}", path.display()),
-                )
+                std::io::Error::new(err.kind(), format!("failed to open `{name}`: {err}"))
             })?;
 
         // Ensure that no other process is or will be writing to the file as long as we have it.
         file.try_lock_shared().map_err(|err| {
-            std::io::Error::new(
-                err.kind(),
-                format!("failed to lock `{}`: {err}", path.display()),
-            )
+            std::io::Error::new(err.kind(), format!("failed to lock `{name}`: {err}"))
         })?;
 
         let inner = file.compat();
 
-        Ok(Self::Reading { permit, inner })
+        Ok(Self::new(name, permit, inner))
     }
 }

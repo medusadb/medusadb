@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use gorgondb::{gorgon::StoreOptions, BlobId};
+use gorgondb::{gorgon::StoreOptions, storage::AwsStorage, BlobId, Storage};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -33,8 +33,24 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let format = tracing_subscriber::fmt::format();
 
-    let gorgon = gorgondb::Gorgon::default();
+    tracing_subscriber::fmt()
+        .event_format(format)
+        .with_ansi(true)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+
+    let sdk_config = aws_config::load_from_env().await;
+    let storage = Storage::Aws(AwsStorage::new(
+        &sdk_config,
+        std::env::var("GORGONDB_AWS_S3_BUCKET_NAME").unwrap(),
+        std::env::var("GORGONDB_AWS_DYNAMODB_TABLE_NAME").unwrap(),
+    ));
+    //let storage = Storage::Filesystem(FilesystemStorage::new(filesystem.clone(), "test").unwrap());
+
+    let gorgon = gorgondb::Gorgon::new(storage);
 
     match args.command {
         Command::Store { path } => {

@@ -3,6 +3,7 @@ use futures::AsyncReadExt;
 use crate::{AsyncSource, BoxAsyncRead};
 
 /// A chain of async sources.
+#[derive(Debug)]
 pub struct AsyncSourceChain<'d> {
     sources: Vec<AsyncSource<'d>>,
     size: u64,

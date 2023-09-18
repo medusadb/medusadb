@@ -3,10 +3,12 @@
 use std::path::{Path, PathBuf};
 
 use futures::{future::BoxFuture, TryStreamExt};
+use humansize::{FormatSize, BINARY};
+use tracing::{instrument, Level};
 
 use crate::{
-    ledger::Ledger, storage::FilesystemStorage, AsyncSource, AsyncSourceChain, BlobId, Filesystem,
-    FragmentationMethod, HashAlgorithm, Storage,
+    ledger::Ledger, AsyncSource, AsyncSourceChain, BlobId, Filesystem, FragmentationMethod,
+    HashAlgorithm, Storage,
 };
 
 /// An error type.
@@ -50,11 +52,10 @@ pub struct Gorgon {
     storage: Storage,
 }
 
-impl Default for Gorgon {
-    fn default() -> Self {
+impl Gorgon {
+    /// Instantiate a new `Gorgon` using the specified storage.
+    pub fn new(storage: Storage) -> Self {
         let filesystem = Filesystem::default();
-        let storage =
-            Storage::Filesystem(FilesystemStorage::new(filesystem.clone(), "test").unwrap());
 
         Self {
             hash_algorithm: HashAlgorithm::Blake3,
@@ -63,9 +64,7 @@ impl Default for Gorgon {
             storage,
         }
     }
-}
 
-impl Gorgon {
     /// Retrieve a value from a file on disk.
     pub async fn retrieve_to_file(&self, blob_id: BlobId, path: impl AsRef<Path>) -> Result<()> {
         let source = self.retrieve(blob_id).await?;
@@ -77,17 +76,29 @@ impl Gorgon {
     }
 
     /// Retrieve a value.
+    #[instrument(level=Level::INFO, skip(self, blob_id), fields(blob_id=blob_id.to_string()))]
     pub fn retrieve(&self, blob_id: BlobId) -> BoxFuture<Result<AsyncSource<'_>>> {
         Box::pin(async move {
             Ok(match blob_id {
-                BlobId::SelfContained(buf) => buf.into(),
+                BlobId::SelfContained(buf) => {
+                    tracing::debug!("Blob is self-contained: retrieving from memory.");
+
+                    buf.into()
+                }
                 BlobId::Ledger { blob_id, .. } => {
+                    tracing::debug!("Blob is a ledger with id `{blob_id}`.");
+
                     let ledger_source = self.retrieve(*blob_id).await?;
                     let ledger =
                         Ledger::async_read_from(ledger_source.get_async_read().await?).await?;
 
                     match ledger {
                         Ledger::LinearAggregate { blob_ids } => {
+                            tracing::debug!(
+                                "Ledger is a linear aggregate of {} blob ids.",
+                                blob_ids.len()
+                            );
+
                             let sources = futures::future::join_all(
                                 blob_ids.into_iter().map(|blob_id| self.retrieve(blob_id)),
                             )
@@ -95,11 +106,19 @@ impl Gorgon {
                             .into_iter()
                             .collect::<Result<Vec<_>>>()?;
 
+                            tracing::debug!("Got all sources from ledger.");
+
                             AsyncSourceChain::new(sources).into()
                         }
                     }
                 }
-                BlobId::RemoteRef(remote_ref) => self.storage.retrieve(&remote_ref).await?,
+                BlobId::RemoteRef(remote_ref) => {
+                    tracing::debug!(
+                        "Blob is stored remotely in ref `{remote_ref}`: fetching from storage..."
+                    );
+
+                    self.storage.retrieve(&remote_ref).await?
+                }
             })
         })
     }
@@ -139,6 +158,12 @@ impl Gorgon {
             } else if !options.disable_fragmentation
                 && ref_size > self.fragmentation_method.min_size()
             {
+                tracing::debug!(
+                    "Source is bigger than the fragmentation threshold ({} > {}): splitting in chunks...",
+                    ref_size.format_size(BINARY),
+                    self.fragmentation_method.min_size().format_size(BINARY),
+                );
+
                 let mut blob_ids =
                     Vec::with_capacity(self.fragmentation_method.fragments_count_hint(ref_size));
                 let r = source.get_async_read().await?;
@@ -157,6 +182,11 @@ impl Gorgon {
                         blob_ids.push(blob_id);
                     }
                 }
+
+                tracing::debug!(
+                    "Fragmentation yielded {} chunks: creating linear aggregate ledger...",
+                    blob_ids.len()
+                );
 
                 let ledger = Ledger::LinearAggregate { blob_ids };
 

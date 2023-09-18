@@ -9,6 +9,7 @@ use crate::{AsyncFileSource, AsyncSourceChain};
 pub type BoxAsyncRead<'s> = Box<dyn AsyncRead + Send + Unpin + 's>;
 
 /// A source of data that can be read asynchronously.
+#[derive(Debug)]
 pub enum AsyncSource<'d> {
     /// The source is a buffer in memory, either owned or borrowed.
     Memory(Cow<'d, [u8]>),
@@ -21,7 +22,7 @@ pub enum AsyncSource<'d> {
 
     /// The source is AWS.
     #[cfg(feature = "aws")]
-    Aws(crate::storage::AsyncAwsSource),
+    Aws(crate::storage::AwsAsyncSource<'d>),
 }
 
 impl<'d> AsyncSource<'d> {
@@ -52,6 +53,16 @@ impl<'d> AsyncSource<'d> {
             Self::Chain(_) | Self::File(_) => None,
             #[cfg(feature = "aws")]
             Self::Aws(source) => source.data(),
+        }
+    }
+
+    /// Get the data, if it lives in memory.
+    pub fn into_data(self) -> Result<Vec<u8>, Self> {
+        match self {
+            Self::Memory(buf) => Ok(buf.to_vec()),
+            Self::Chain(_) | Self::File(_) => Err(self),
+            #[cfg(feature = "aws")]
+            Self::Aws(source) => source.into_data().map_err(Self::Aws),
         }
     }
 
@@ -117,9 +128,8 @@ impl From<AsyncFileSource> for AsyncSource<'_> {
     }
 }
 
-#[cfg(feature = "aws")]
-impl From<crate::storage::AsyncAwsSource> for AsyncSource<'_> {
-    fn from(value: crate::storage::AsyncAwsSource) -> Self {
+impl<'d> From<crate::storage::AwsAsyncSource<'d>> for AsyncSource<'d> {
+    fn from(value: crate::storage::AwsAsyncSource<'d>) -> Self {
         Self::Aws(value)
     }
 }

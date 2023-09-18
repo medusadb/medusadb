@@ -11,6 +11,7 @@ use crate::{AsyncReadInit, BoxAsyncRead};
 use super::AsyncFileRead;
 
 /// A source file on disk.
+#[derive(Debug)]
 pub struct AsyncFileSource {
     path: PathBuf,
     size: u64,
