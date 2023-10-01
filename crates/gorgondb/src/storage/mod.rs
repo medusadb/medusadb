@@ -11,7 +11,12 @@ pub use aws::{
 };
 pub use filesystem::FilesystemStorage;
 
-use crate::{HashAlgorithm, RemoteRef};
+use async_trait::async_trait;
+
+use crate::{
+    gorgon::{Retrieve, Store},
+    RemoteRef,
+};
 
 /// An error type for storage implementations.
 #[derive(Debug, thiserror::Error)]
@@ -35,7 +40,8 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// A struct that can persist and recover values remotely.
 ///
-/// `Storage` uses static dispatch to call concrete implementations.
+/// `Storage` uses static dispatch to call concrete implementations. They are designed to be cheap
+/// to clone.
 #[derive(Debug, Clone)]
 pub enum Storage {
     /// Store files on the file-system.
@@ -46,53 +52,22 @@ pub enum Storage {
     Aws(aws::AwsStorage),
 }
 
-impl Storage {
+#[async_trait]
+impl<'d> Retrieve<'d> for Storage {
     /// Retrieve a value
-    pub(crate) async fn retrieve(&self, remote_ref: &RemoteRef) -> Result<crate::AsyncSource> {
+    async fn retrieve(&'d self, remote_ref: &RemoteRef) -> Result<crate::AsyncSource<'d>> {
         match self {
             Self::Filesystem(storage) => Ok(storage.retrieve(remote_ref).await?.into()),
             #[cfg(feature = "aws")]
             Self::Aws(storage) => Ok(storage.retrieve(remote_ref).await?.into()),
         }
     }
+}
 
+#[async_trait]
+impl Store for Storage {
     /// Store a value and ensures it has the proper remote ref.
-    pub(crate) async fn store(
-        &self,
-        hash_algorithm: HashAlgorithm,
-        source: impl Into<crate::AsyncSource<'_>>,
-    ) -> Result<RemoteRef> {
-        let source = source.into();
-
-        let hash = hash_algorithm
-            .async_hash_to_vec(source.get_async_read().await?)
-            .await?
-            .into();
-
-        let remote_ref = RemoteRef {
-            ref_size: source.size(),
-            hash_algorithm,
-            hash,
-        };
-
-        self.store_unchecked(&remote_ref, source).await?;
-
-        Ok(remote_ref)
-    }
-
-    /// Store a value.
-    ///
-    /// Regardless of the actual storage logic, callers should not assume that any kind of check will
-    /// be made on the actual content of the stored values to ensure their hash match their `RemoteRef`
-    /// hash.
-    ///
-    /// Attempting to store a value with a non-matching hash will cause silent data corruption. Be
-    /// careful and do NOT do it.
-    async fn store_unchecked(
-        &self,
-        remote_ref: &RemoteRef,
-        source: crate::AsyncSource<'_>,
-    ) -> Result<()> {
+    async fn store(&self, remote_ref: &RemoteRef, source: crate::AsyncSource<'_>) -> Result<()> {
         match self {
             Self::Filesystem(storage) => storage.store(remote_ref, source).await?,
             #[cfg(feature = "aws")]

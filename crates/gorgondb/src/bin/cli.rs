@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     ));
     //let storage = Storage::Filesystem(FilesystemStorage::new(filesystem.clone(), "test").unwrap());
 
-    let gorgon = gorgondb::Gorgon::new(storage);
+    let gorgon = gorgondb::Client::new(storage);
 
     match args.command {
         Command::Store { path } => {

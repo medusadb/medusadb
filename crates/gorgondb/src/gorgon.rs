@@ -2,13 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
+use async_trait::async_trait;
 use futures::{future::BoxFuture, TryStreamExt};
 use humansize::{FormatSize, BINARY};
 use tracing::{instrument, Level};
 
 use crate::{
     ledger::Ledger, AsyncSource, AsyncSourceChain, BlobId, Filesystem, FragmentationMethod,
-    HashAlgorithm, Storage,
+    HashAlgorithm, RemoteRef,
 };
 
 /// An error type.
@@ -44,30 +45,38 @@ pub struct StoreOptions {
 }
 
 /// A `Gorgon` implements high-level primitives to store and retrieve data blobs.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Gorgon {
     hash_algorithm: HashAlgorithm,
     fragmentation_method: FragmentationMethod,
     filesystem: Filesystem,
-    storage: Storage,
 }
 
-impl Gorgon {
-    /// Instantiate a new `Gorgon` using the specified storage.
-    pub fn new(storage: Storage) -> Self {
-        let filesystem = Filesystem::default();
-
+impl Default for Gorgon {
+    fn default() -> Self {
         Self {
             hash_algorithm: HashAlgorithm::Blake3,
             fragmentation_method: FragmentationMethod::Fastcdc(Default::default()),
-            filesystem,
-            storage,
+            filesystem: Filesystem::default(),
         }
     }
+}
 
-    /// Retrieve a value from a file on disk.
-    pub async fn retrieve_to_file(&self, blob_id: BlobId, path: impl AsRef<Path>) -> Result<()> {
-        let source = self.retrieve(blob_id).await?;
+impl Gorgon {
+    /// Get the associated filesystem instance.
+    pub fn filesystem(&self) -> &Filesystem {
+        &self.filesystem
+    }
+
+    /// Retrieve a value from the specified storage and persist it to the specified path on the
+    /// local disk.
+    pub async fn retrieve_to_file_from<'s>(
+        &'s self,
+        storage: &'s (impl Retrieve<'s> + Sync),
+        blob_id: BlobId,
+        path: impl AsRef<Path>,
+    ) -> Result<()> {
+        let source = self.retrieve_from(storage, blob_id).await?;
 
         self.filesystem
             .save_source(path, source)
@@ -75,9 +84,13 @@ impl Gorgon {
             .map_err(Into::into)
     }
 
-    /// Retrieve a value.
-    #[instrument(level=Level::INFO, skip(self, blob_id), fields(blob_id=blob_id.to_string()))]
-    pub fn retrieve(&self, blob_id: BlobId) -> BoxFuture<Result<AsyncSource<'_>>> {
+    /// Retrieve a value from the specified storage.
+    #[instrument(level=Level::INFO, skip(self, storage, blob_id), fields(blob_id=blob_id.to_string()))]
+    pub fn retrieve_from<'s>(
+        &'s self,
+        storage: &'s (impl Retrieve<'s> + Sync),
+        blob_id: BlobId,
+    ) -> BoxFuture<Result<AsyncSource<'s>>> {
         Box::pin(async move {
             Ok(match blob_id {
                 BlobId::SelfContained(buf) => {
@@ -88,7 +101,7 @@ impl Gorgon {
                 BlobId::Ledger { blob_id, .. } => {
                     tracing::debug!("Blob is a ledger with id `{blob_id}`.");
 
-                    let ledger_source = self.retrieve(*blob_id).await?;
+                    let ledger_source = self.retrieve_from(storage, *blob_id).await?;
                     let ledger =
                         Ledger::async_read_from(ledger_source.get_async_read().await?).await?;
 
@@ -100,7 +113,9 @@ impl Gorgon {
                             );
 
                             let sources = futures::future::join_all(
-                                blob_ids.into_iter().map(|blob_id| self.retrieve(blob_id)),
+                                blob_ids
+                                    .into_iter()
+                                    .map(|blob_id| self.retrieve_from(storage, blob_id)),
                             )
                             .await
                             .into_iter()
@@ -117,37 +132,38 @@ impl Gorgon {
                         "Blob is stored remotely in ref `{remote_ref}`: fetching from storage..."
                     );
 
-                    self.storage.retrieve(&remote_ref).await?
+                    storage.retrieve(&remote_ref).await?
                 }
             })
         })
     }
 
-    /// Store a file from the disk.
+    /// Store a file from the disk in the specified storage.
     ///
     /// This is a convenience method.
-    pub async fn store_from_file(
+    pub async fn store_from_file_in(
         &self,
+        storage: &(impl Store + Sync),
         path: impl Into<PathBuf>,
         options: &StoreOptions,
     ) -> Result<BlobId> {
         let source = self.filesystem.load_source(path).await?;
 
-        self.store(source, options).await
+        self.store_in(storage, source.into(), options).await
     }
 
-    /// Store and persist a value.
+    /// Store and persist a value in the specified storage.
     ///
     /// Upon success, a `BlobId` describing the value is returned. Losing the resulting `BlobId`
     /// equates to losing the value. It is the caller's responsibility to store [`BlobIds`](`BlobId`)
     /// appropriately.
-    pub fn store<'s>(
+    #[instrument(level=Level::INFO, skip(self, storage))]
+    pub(crate) fn store_in<'s>(
         &'s self,
-        source: impl Into<AsyncSource<'s>>,
+        storage: &'s (impl Store + Sync),
+        source: AsyncSource<'s>,
         options: &'s StoreOptions,
     ) -> BoxFuture<'s, Result<BlobId>> {
-        let source = source.into();
-
         Box::pin(async move {
             let ref_size = source.size();
 
@@ -178,7 +194,7 @@ impl Gorgon {
                     options.disable_fragmentation = true;
 
                     while let Some(fragment) = stream.try_next().await? {
-                        let blob_id = self.store(fragment, &options).await?;
+                        let blob_id = self.store_in(storage, fragment.into(), &options).await?;
                         blob_ids.push(blob_id);
                     }
                 }
@@ -190,16 +206,48 @@ impl Gorgon {
 
                 let ledger = Ledger::LinearAggregate { blob_ids };
 
-                let blob_id = Box::new(self.store(ledger.to_vec(), options).await?);
+                let blob_id = Box::new(
+                    self.store_in(storage, ledger.to_vec().into(), options)
+                        .await?,
+                );
 
                 Ok(BlobId::Ledger { ref_size, blob_id })
             } else {
-                self.storage
-                    .store(self.hash_algorithm, source)
-                    .await
-                    .map(Into::into)
-                    .map_err(Into::into)
+                let hash = self
+                    .hash_algorithm
+                    .async_hash_to_vec(source.get_async_read().await?)
+                    .await?
+                    .into();
+
+                let remote_ref = RemoteRef {
+                    ref_size: source.size(),
+                    hash_algorithm: self.hash_algorithm,
+                    hash,
+                };
+
+                storage.store(&remote_ref, source).await.map(Into::into)?;
+
+                Ok(remote_ref.into())
             }
         })
     }
+}
+
+/// A trait for types that can retrieve remote blobs.
+#[async_trait]
+pub trait Retrieve<'d> {
+    async fn retrieve(
+        &'d self,
+        remote_ref: &RemoteRef,
+    ) -> crate::storage::Result<crate::AsyncSource<'d>>;
+}
+
+/// A trait for types that can store remote blobs.
+#[async_trait]
+pub trait Store {
+    async fn store(
+        &self,
+        remote_ref: &RemoteRef,
+        source: crate::AsyncSource<'_>,
+    ) -> crate::storage::Result<()>;
 }
