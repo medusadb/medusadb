@@ -23,22 +23,26 @@ impl AsyncFileSource {
     ///
     /// Creating an `AsyncRead` from this source will require that the specified semaphore still
     /// has some permits to lend.
-    pub(crate) async fn open(semaphore: Arc<Semaphore>, path: PathBuf) -> std::io::Result<Self> {
-        let size = tokio::fs::metadata(&path)
-            .await
-            .map_err(|err| {
-                std::io::Error::new(
-                    err.kind(),
-                    format!("failed to read metadata for `{}`: {err}", path.display()),
-                )
-            })?
-            .len();
+    pub(crate) async fn open(
+        semaphore: Arc<Semaphore>,
+        path: PathBuf,
+    ) -> std::io::Result<Option<Self>> {
+        match tokio::fs::metadata(&path).await {
+            Ok(metadata) => {
+                let size = metadata.len();
 
-        Ok(Self {
-            path,
-            size,
-            semaphore,
-        })
+                Ok(Some(Self {
+                    path,
+                    size,
+                    semaphore,
+                }))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(std::io::Error::new(
+                err.kind(),
+                format!("failed to read metadata for `{}`: {err}", path.display()),
+            )),
+        }
     }
 
     async fn get_async_file_read(

@@ -1,41 +1,9 @@
 use aws_config::SdkConfig;
-use aws_sdk_dynamodb::{
-    operation::{get_item::GetItemError, put_item::PutItemError},
-    primitives::Blob,
-    types::AttributeValue,
-};
-use aws_sdk_s3::primitives::SdkBody;
-use http::Response;
+use aws_sdk_dynamodb::{primitives::Blob, types::AttributeValue};
 use tracing::debug;
 
+use super::{Error, Result};
 use crate::RemoteRef;
-
-/// AWS errors.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// A AWS DynamoDB get item callfailed.
-    #[error("failed to execute GetItem")]
-    GetItem(#[from] aws_sdk_dynamodb::error::SdkError<GetItemError, Response<SdkBody>>),
-
-    /// A AWS DynamoDB put item callfailed.
-    #[error("failed to execute PutItem")]
-    PutItem(#[from] aws_sdk_dynamodb::error::SdkError<PutItemError, Response<SdkBody>>),
-
-    /// The AWS DynamoDB item was not found...
-    #[error("item was not found")]
-    NotFound,
-
-    /// The AWS DynamoDB item has an incorrect structure.
-    #[error("data in DynamoDB is corrupted: {0}")]
-    CorruptedData(String),
-
-    /// An I/O error occured.
-    #[error("I/O error")]
-    Io(#[from] std::io::Error),
-}
-
-/// A convenience result type for AWS errors.
-pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// A storage that uses AWS DynamoDB.
 #[derive(Debug, Clone)]
@@ -59,14 +27,17 @@ impl Storage {
     /// Retrieve a value from DynamoDB.
     ///
     /// There is no streaming involved as values in DynamoDB are small by design.
-    pub async fn retrieve(&self, remote_ref: &RemoteRef) -> Result<Vec<u8>> {
+    ///
+    /// If the value does not exist, `Ok(None)` is returned.
+    pub async fn retrieve(&self, remote_ref: &RemoteRef) -> Result<Option<Vec<u8>>> {
         let resp = self
             .client
             .get_item()
             .table_name(&self.table_name)
             .key(Self::PK, AttributeValue::B(Blob::new(remote_ref.to_vec())))
             .send()
-            .await?;
+            .await
+            .map_err(Error::new)?;
 
         if let Some(consumed_capacity) = resp.consumed_capacity() {
             debug!(
@@ -75,16 +46,15 @@ impl Storage {
             );
         }
 
-        let mut item = resp.item.ok_or_else(|| Error::NotFound)?;
-
-        match item
-            .remove(Self::DATA)
-            .ok_or_else(|| Error::CorruptedData("missing data attribute".to_owned()))?
-        {
-            AttributeValue::B(blob) => Ok(blob.into_inner()),
-            _ => Err(Error::CorruptedData(
-                "data attribute is not binary".to_owned(),
-            )),
+        match resp.item {
+            Some(mut item) => match item
+                .remove(Self::DATA)
+                .ok_or_else(|| Error::from_string("missing data attribute"))?
+            {
+                AttributeValue::B(blob) => Ok(Some(blob.into_inner())),
+                _ => Err(Error::from_string("data attribute is not binary")),
+            },
+            None => Ok(None),
         }
     }
 
@@ -98,7 +68,14 @@ impl Storage {
     ) -> Result<()> {
         let attributes = [
             (Self::PK, remote_ref.to_vec()),
-            (Self::DATA, source.into().read_all_into_vec().await?),
+            (
+                Self::DATA,
+                source
+                    .into()
+                    .read_all_into_vec()
+                    .await
+                    .map_err(Error::new)?,
+            ),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_owned(), AttributeValue::B(Blob::new(v))))
@@ -131,7 +108,7 @@ impl Storage {
 
                 Ok(())
             }
-            Err(err) => Err(err.into()),
+            Err(err) => Err(Error::new(err)),
         }
     }
 }

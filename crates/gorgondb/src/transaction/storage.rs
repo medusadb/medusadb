@@ -67,7 +67,7 @@ impl Retrieve for Storage {
     async fn retrieve<'s>(
         &'s self,
         remote_ref: &RemoteRef,
-    ) -> crate::storage::Result<crate::AsyncSource<'s>> {
+    ) -> crate::storage::Result<Option<crate::AsyncSource<'s>>> {
         let blobs = self.blobs.read().await;
 
         let ref_blob = blobs.get(remote_ref).ok_or_else(|| {
@@ -78,12 +78,12 @@ impl Retrieve for Storage {
         })?;
 
         match &ref_blob.data {
-            Some(data) => Ok(data.clone().into()),
+            Some(data) => Ok(Some(data.clone().into())),
             None => self
                 .filesystem_storage
                 .retrieve(remote_ref)
                 .await
-                .map(Into::into)
+                .map(|o| o.map(Into::into))
                 .map_err(Into::into),
         }
     }

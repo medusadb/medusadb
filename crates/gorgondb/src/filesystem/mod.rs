@@ -36,7 +36,10 @@ impl Default for Filesystem {
 
 impl Filesystem {
     /// Load a file source from the disk.
-    pub async fn load_source(&self, path: impl Into<PathBuf>) -> std::io::Result<AsyncFileSource> {
+    pub async fn load_source(
+        &self,
+        path: impl Into<PathBuf>,
+    ) -> std::io::Result<Option<AsyncFileSource>> {
         let semaphore = self.semaphore.clone();
 
         AsyncFileSource::open(semaphore, path.into()).await

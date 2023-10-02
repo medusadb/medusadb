@@ -74,7 +74,10 @@ impl<'d> AsyncSource<'d> {
             Self::Chain(chain) => chain.read_all_into_vec().await,
             Self::File(file) => file.read_all_into_vec().await,
             #[cfg(feature = "aws")]
-            Self::Aws(source) => source.read_all_into_vec().await,
+            Self::Aws(source) => source
+                .read_all_into_vec()
+                .await
+                .map_err(|err| err.into_io_error()),
         }
     }
 
@@ -87,7 +90,12 @@ impl<'d> AsyncSource<'d> {
             Self::Chain(chain) => Box::pin(async move { chain.get_async_read().await }),
             Self::File(file) => Box::pin(async move { file.get_async_read().await }),
             #[cfg(feature = "aws")]
-            Self::Aws(source) => Box::pin(async move { source.get_async_read().await }),
+            Self::Aws(source) => Box::pin(async move {
+                source
+                    .get_async_read()
+                    .await
+                    .map_err(|err| err.into_io_error())
+            }),
         }
     }
 }

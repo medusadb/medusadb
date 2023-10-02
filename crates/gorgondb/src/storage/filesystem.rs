@@ -23,7 +23,10 @@ impl FilesystemStorage {
     }
 
     /// Retrieve a value on disk.
-    pub async fn retrieve(&self, remote_ref: &RemoteRef) -> std::io::Result<AsyncFileSource> {
+    pub async fn retrieve(
+        &self,
+        remote_ref: &RemoteRef,
+    ) -> std::io::Result<Option<AsyncFileSource>> {
         let path = self.get_path(remote_ref);
 
         self.filesystem.load_source(path).await

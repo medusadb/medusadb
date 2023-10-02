@@ -1,11 +1,12 @@
 #![cfg(feature = "aws")]
 
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, fmt::Display, sync::Arc};
 
 use aws_config::SdkConfig;
+use aws_sdk_dynamodb::error::DisplayErrorContext;
 use futures::future::BoxFuture;
 
-use crate::{AsyncReadFailure, BoxAsyncRead, RemoteRef};
+use crate::{BoxAsyncRead, RemoteRef};
 
 mod dynamodb;
 mod s3;
@@ -15,14 +16,26 @@ pub use s3::{AsyncSource as S3AsyncSource, Storage as S3Storage};
 
 /// AWS errors.
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// AWS S3 error.
-    #[error("S3 error")]
-    S3(#[from] s3::Error),
+pub struct Error(String);
 
-    /// AWS DynamoDB error.
-    #[error("DynamoDB error")]
-    DynamoDb(#[from] dynamodb::Error),
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AWS: {}", self.0)
+    }
+}
+
+impl Error {
+    pub(crate) fn from_string(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub(crate) fn new(value: impl std::error::Error) -> Self {
+        Self(DisplayErrorContext(value).to_string())
+    }
+
+    pub(crate) fn into_io_error(self) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::Other, self.to_string())
+    }
 }
 
 /// A convenience result type for AWS errors.
@@ -55,17 +68,17 @@ impl AwsStorage {
     }
 
     /// Retrieve a value on AWS.
-    pub async fn retrieve(&self, remote_ref: &RemoteRef) -> Result<AsyncSource> {
+    pub async fn retrieve(&self, remote_ref: &RemoteRef) -> Result<Option<AsyncSource>> {
         if remote_ref.ref_size() < Self::THRESHOLD_SIZE {
-            match self.dynamodb.retrieve(remote_ref).await {
-                Ok(buf) => Ok(buf.into()),
-                Err(err) if matches!(err, dynamodb::Error::NotFound) => {
-                    Ok(AsyncSource::Missing(remote_ref.ref_size()))
-                }
-                Err(err) => Err(err.into()),
-            }
+            self.dynamodb
+                .retrieve(remote_ref)
+                .await
+                .map(|o| o.map(Into::into))
         } else {
-            Ok(self.s3.retrieve(remote_ref).into())
+            self.s3
+                .retrieve(remote_ref)
+                .await
+                .map(|o| o.map(Into::into))
         }
     }
 
@@ -90,9 +103,6 @@ impl AwsStorage {
 /// A source of data that comes from Aws.
 #[derive(Debug)]
 pub enum AsyncSource<'d> {
-    /// A missing item.
-    Missing(u64),
-
     /// The source comes from AWS DynamoDB.
     DynamoDb(Cow<'d, [u8]>),
 
@@ -104,7 +114,6 @@ impl<'d> AsyncSource<'d> {
     /// Get the size of the data.
     pub fn size(&self) -> u64 {
         match self {
-            Self::Missing(size) => *size,
             Self::DynamoDb(buf) => buf.len().try_into().expect("buffer should fit in a u64"),
             Self::S3(source) => source.size(),
         }
@@ -114,7 +123,7 @@ impl<'d> AsyncSource<'d> {
     pub fn data(&self) -> Option<&[u8]> {
         match self {
             Self::DynamoDb(buf) => Some(buf),
-            Self::Missing(_) | Self::S3(_) => None,
+            Self::S3(_) => None,
         }
     }
 
@@ -122,29 +131,22 @@ impl<'d> AsyncSource<'d> {
     pub fn into_data(self) -> Result<Vec<u8>, Self> {
         match self {
             Self::DynamoDb(buf) => Ok(buf.to_vec()),
-            Self::Missing(_) | Self::S3(_) => Err(self),
+            Self::S3(_) => Err(self),
         }
     }
 
     /// Transform the source in a buffer in memory, reading the entirety of the data first if
     /// necessary.
-    pub async fn read_all_into_vec(self) -> std::io::Result<Vec<u8>> {
+    pub async fn read_all_into_vec(self) -> Result<Vec<u8>> {
         match self {
-            Self::Missing(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "the item does no exist".to_owned(),
-            )),
             Self::DynamoDb(buf) => Ok(buf.to_vec()),
             Self::S3(source) => source.read_all_into_vec().await,
         }
     }
 
     /// Get an asynchronous reader from this `AsyncSource`.
-    pub fn get_async_read(&self) -> BoxFuture<'_, std::io::Result<BoxAsyncRead<'_>>> {
+    pub fn get_async_read(&self) -> BoxFuture<'_, Result<BoxAsyncRead<'_>>> {
         match self {
-            Self::Missing(_) => {
-                Box::pin(async move { Ok(Box::<AsyncReadFailure>::default() as BoxAsyncRead) })
-            }
             Self::DynamoDb(buf) => {
                 Box::pin(async move { Ok(Box::new(futures::io::Cursor::new(buf)) as BoxAsyncRead) })
             }

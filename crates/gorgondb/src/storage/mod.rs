@@ -35,13 +35,6 @@ pub enum Error {
     Aws(#[from] AwsError),
 }
 
-impl Error {
-    /// Check if the error occured because a blob was not found.
-    pub fn is_not_found(&self) -> bool {
-        matches!(self, Self::Io(err) if err.kind() == std::io::ErrorKind::NotFound)
-    }
-}
-
 /// A convenience result type.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -62,11 +55,14 @@ pub enum Storage {
 #[async_trait]
 impl Retrieve for Storage {
     /// Retrieve a value
-    async fn retrieve<'s>(&'s self, remote_ref: &RemoteRef) -> Result<crate::AsyncSource<'s>> {
+    async fn retrieve<'s>(
+        &'s self,
+        remote_ref: &RemoteRef,
+    ) -> Result<Option<crate::AsyncSource<'s>>> {
         match self {
-            Self::Filesystem(storage) => Ok(storage.retrieve(remote_ref).await?.into()),
+            Self::Filesystem(storage) => Ok(storage.retrieve(remote_ref).await?.map(Into::into)),
             #[cfg(feature = "aws")]
-            Self::Aws(storage) => Ok(storage.retrieve(remote_ref).await?.into()),
+            Self::Aws(storage) => Ok(storage.retrieve(remote_ref).await?.map(Into::into)),
         }
     }
 }

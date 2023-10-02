@@ -32,13 +32,6 @@ pub enum Error {
     Fragmentation(#[from] crate::fragmentation::Error),
 }
 
-impl Error {
-    /// Check if the error occured because a blob was not found.
-    pub fn is_not_found(&self) -> bool {
-        matches!(self, Self::Storage(err) if err.is_not_found())
-    }
-}
-
 /// A convenience result type.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -139,7 +132,16 @@ impl Gorgon {
                         "Blob is stored remotely in ref `{remote_ref}`: fetching from storage..."
                     );
 
-                    storage.retrieve(&remote_ref).await?
+                    match storage.retrieve(&remote_ref).await? {
+                        Some(source) => source,
+                        None => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                "failed to retrieve non-existing remote ref `{remote_ref}`",
+                            )
+                            .into())
+                        }
+                    }
                 }
             })
         })
@@ -154,9 +156,14 @@ impl Gorgon {
         path: impl Into<PathBuf>,
         options: &StoreOptions,
     ) -> Result<BlobId> {
-        let source = self.filesystem.load_source(path).await?;
-
-        self.store_in(storage, source.into(), options).await
+        match self.filesystem.load_source(path).await? {
+            Some(source) => self.store_in(storage, source.into(), options).await,
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "fail to read source file",
+            )
+            .into()),
+        }
     }
 
     /// Store and persist a value in the specified storage.
@@ -164,7 +171,7 @@ impl Gorgon {
     /// Upon success, a `BlobId` describing the value is returned. Losing the resulting `BlobId`
     /// equates to losing the value. It is the caller's responsibility to store [`BlobIds`](`BlobId`)
     /// appropriately.
-    #[instrument(level=Level::INFO, skip(self, storage))]
+    #[instrument(level=Level::INFO, skip(self, storage, source))]
     pub(crate) fn store_in<'s>(
         &'s self,
         storage: &'s (impl Store + Sync),
@@ -243,10 +250,13 @@ impl Gorgon {
 /// A trait for types that can retrieve remote blobs.
 #[async_trait]
 pub trait Retrieve {
+    /// Retrieve a remote reference.
+    ///
+    /// If it doesn't exist, `Ok(None)` is returned.
     async fn retrieve<'s>(
         &'s self,
         remote_ref: &RemoteRef,
-    ) -> crate::storage::Result<crate::AsyncSource<'s>>;
+    ) -> crate::storage::Result<Option<crate::AsyncSource<'s>>>;
 }
 
 /// A trait for types that can store remote blobs.
