@@ -61,7 +61,7 @@ impl Client {
     }
 
     /// Start a new transaction on the client.
-    pub fn start_transaction<'d>(self: &Arc<Self>) -> std::io::Result<Transaction<'d>> {
+    pub fn start_transaction(self: &Arc<Self>) -> std::io::Result<Transaction> {
         Transaction::new(Arc::clone(self))
     }
 }

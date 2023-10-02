@@ -152,11 +152,17 @@ impl AsyncSource {
             .key(key)
             .send()
             .await
-            .map_err(|err| {
-                std::io::Error::new(
+            .map_err(|err| match err.into_service_error() {
+                aws_sdk_s3::operation::get_object::GetObjectError::NoSuchKey(_) => {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("S3 object `{name}` does not exist",),
+                    )
+                }
+                err => std::io::Error::new(
                     std::io::ErrorKind::Other,
                     format!("failed to get S3 object from `{name}`: {err}",),
-                )
+                ),
             })?;
 
         tracing::debug!("Got async reader for `{name}`.");

@@ -23,7 +23,7 @@ use crate::{
 pub enum Error {
     /// An I/O error occured.
     #[error("I/O error")]
-    IO(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
 
     /// Data corruption was detected.
     #[error("data corruption: {0}")]
@@ -33,6 +33,13 @@ pub enum Error {
     #[cfg(feature = "aws")]
     #[error("AWS operation failed")]
     Aws(#[from] AwsError),
+}
+
+impl Error {
+    /// Check if the error occured because a blob was not found.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::Io(err) if err.kind() == std::io::ErrorKind::NotFound)
+    }
 }
 
 /// A convenience result type.
@@ -53,9 +60,9 @@ pub enum Storage {
 }
 
 #[async_trait]
-impl<'d> Retrieve<'d> for Storage {
+impl Retrieve for Storage {
     /// Retrieve a value
-    async fn retrieve(&'d self, remote_ref: &RemoteRef) -> Result<crate::AsyncSource<'d>> {
+    async fn retrieve<'s>(&'s self, remote_ref: &RemoteRef) -> Result<crate::AsyncSource<'s>> {
         match self {
             Self::Filesystem(storage) => Ok(storage.retrieve(remote_ref).await?.into()),
             #[cfg(feature = "aws")]

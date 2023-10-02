@@ -32,6 +32,13 @@ pub enum Error {
     Fragmentation(#[from] crate::fragmentation::Error),
 }
 
+impl Error {
+    /// Check if the error occured because a blob was not found.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::Storage(err) if err.is_not_found())
+    }
+}
+
 /// A convenience result type.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -72,7 +79,7 @@ impl Gorgon {
     /// local disk.
     pub async fn retrieve_to_file_from<'s>(
         &'s self,
-        storage: &'s (impl Retrieve<'s> + Sync),
+        storage: &'s (impl Retrieve + Sync),
         blob_id: BlobId,
         path: impl AsRef<Path>,
     ) -> Result<()> {
@@ -88,7 +95,7 @@ impl Gorgon {
     #[instrument(level=Level::INFO, skip(self, storage, blob_id), fields(blob_id=blob_id.to_string()))]
     pub fn retrieve_from<'s>(
         &'s self,
-        storage: &'s (impl Retrieve<'s> + Sync),
+        storage: &'s (impl Retrieve + Sync),
         blob_id: BlobId,
     ) -> BoxFuture<Result<AsyncSource<'s>>> {
         Box::pin(async move {
@@ -235,11 +242,11 @@ impl Gorgon {
 
 /// A trait for types that can retrieve remote blobs.
 #[async_trait]
-pub trait Retrieve<'d> {
-    async fn retrieve(
-        &'d self,
+pub trait Retrieve {
+    async fn retrieve<'s>(
+        &'s self,
         remote_ref: &RemoteRef,
-    ) -> crate::storage::Result<crate::AsyncSource<'d>>;
+    ) -> crate::storage::Result<crate::AsyncSource<'s>>;
 }
 
 /// A trait for types that can store remote blobs.
