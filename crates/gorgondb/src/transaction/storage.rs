@@ -5,31 +5,61 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 use crate::{
-    gorgon::{Retrieve, Store},
-    storage::FilesystemStorage,
+    gorgon::{Retrieve, Store, Unstore},
+    storage::{Error, FilesystemStorage},
     Filesystem, RemoteRef,
 };
 
 // An in-memory/on-disk local storage for transactions.
 #[derive(Debug)]
 pub(crate) struct Storage {
-    disk_threshold: u64,
+    disk_size_threshold: u64,
     blobs: Arc<RwLock<HashMap<RemoteRef, RefCountedBlob>>>,
     filesystem_storage: FilesystemStorage,
     _filesystem_root: TempDir, // Keep the folder alive.
+    base_storage: Arc<crate::Storage>,
 }
 
 impl Storage {
-    pub(crate) fn new(disk_threshold: u64, filesystem: Filesystem) -> std::io::Result<Self> {
-        let filesystem_root = tempfile::TempDir::new()?;
-        let filesystem_storage = FilesystemStorage::new(filesystem, filesystem_root.path())?;
+    pub(crate) fn new(
+        disk_size_threshold: u64,
+        filesystem: Filesystem,
+        base_storage: Arc<crate::Storage>,
+    ) -> std::io::Result<Self> {
+        let _filesystem_root = tempfile::TempDir::new()?;
+        let filesystem_storage = FilesystemStorage::new(filesystem, _filesystem_root.path())?;
 
         Ok(Self {
-            disk_threshold,
+            disk_size_threshold,
             blobs: Arc::default(),
             filesystem_storage,
-            _filesystem_root: filesystem_root,
+            _filesystem_root,
+            base_storage,
         })
+    }
+
+    pub(crate) async fn commit(self) -> crate::storage::Result<()> {
+        let blobs = Arc::into_inner(self.blobs)
+            .expect("blobs should never have been cloned")
+            .into_inner();
+
+        let filesystem_storage = self.filesystem_storage;
+        let _filesystem_root = self._filesystem_root;
+        let base_storage = self.base_storage;
+
+        for (remote_ref, ref_counted_blob) in blobs {
+            match ref_counted_blob.data {
+                Some(data) => base_storage.store(&remote_ref, data.into()).await?,
+                None => match filesystem_storage.retrieve(&remote_ref).await? {
+                    Some(source) => {
+                        base_storage.store(&remote_ref, source.into()).await?
+                    }
+                    None => return Err(Error::DataCorruption(format!("the remote-ref `{remote_ref}` should exist in the local filesystem storage"))),
+                },
+            };
+        }
+
+        Ok(())
     }
 }
 
@@ -46,7 +76,7 @@ impl Store for Storage {
                 entry.into_mut().count += 1;
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
-                let data = if source.size() > self.disk_threshold {
+                let data = if source.size() > self.disk_size_threshold {
                     self.filesystem_storage.store(entry.key(), source).await?;
 
                     None
@@ -54,7 +84,7 @@ impl Store for Storage {
                     Some(source.read_all_into_vec().await?.into())
                 };
 
-                entry.insert(RefCountedBlob { count: 1, data });
+                entry.insert(RefCountedBlob::new(data));
             }
         };
 
@@ -70,21 +100,40 @@ impl Retrieve for Storage {
     ) -> crate::storage::Result<Option<crate::AsyncSource<'s>>> {
         let blobs = self.blobs.read().await;
 
-        let ref_blob = blobs.get(remote_ref).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("no remote-ref was found for `{remote_ref}`"),
-            )
-        })?;
+        match blobs.get(remote_ref) {
+            Some(ref_blob) => match &ref_blob.data {
+                Some(data) => Ok(Some(data.clone().into())),
+                None => self
+                    .filesystem_storage
+                    .retrieve(remote_ref)
+                    .await
+                    .map(|o| o.map(Into::into))
+                    .map_err(Into::into),
+            },
+            None => {
+                // Make sure we free the read-lock before reading from the base storage.
+                drop(blobs);
 
-        match &ref_blob.data {
-            Some(data) => Ok(Some(data.clone().into())),
-            None => self
-                .filesystem_storage
-                .retrieve(remote_ref)
-                .await
-                .map(|o| o.map(Into::into))
-                .map_err(Into::into),
+                // The reference was not found: check in the base-storage.
+                self.base_storage.retrieve(remote_ref).await
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Unstore for Storage {
+    async fn unstore(&self, remote_ref: &RemoteRef) {
+        if let std::collections::hash_map::Entry::Occupied(entry) =
+            self.blobs.write().await.entry(remote_ref.clone())
+        {
+            // The entry exists already: if it has a single reference, we must delete it
+            // entirely.
+            if entry.get().count == 0 {
+                entry.remove();
+            } else {
+                entry.into_mut().count -= 1;
+            }
         }
     }
 }
@@ -93,4 +142,10 @@ impl Retrieve for Storage {
 struct RefCountedBlob {
     count: u32,
     data: Option<Cow<'static, [u8]>>,
+}
+
+impl RefCountedBlob {
+    fn new(data: Option<Cow<'static, [u8]>>) -> Self {
+        Self { data, count: 0 }
+    }
 }

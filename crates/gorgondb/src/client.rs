@@ -10,26 +10,30 @@ use crate::{AsyncSource, BlobId, Gorgon, Storage, Transaction};
 #[derive(Debug)]
 pub struct Client {
     pub(crate) gorgon: Gorgon,
-    pub(crate) storage: Storage,
+    pub(crate) storage: Arc<Storage>,
 }
 
 impl Client {
     /// Instantiate a new `Gorgon` using the specified storage.
     pub fn new(storage: Storage) -> Self {
         let gorgon = Gorgon::default();
+        let storage = Arc::new(storage);
+
         Self { gorgon, storage }
     }
 
     /// Retrieve a value from a file on disk.
     pub async fn retrieve_to_file(&self, blob_id: BlobId, path: impl AsRef<Path>) -> Result<()> {
         self.gorgon
-            .retrieve_to_file_from(&self.storage, blob_id, path)
+            .retrieve_to_file_from(self.storage.as_ref(), blob_id, path)
             .await
     }
 
     /// Retrieve a value.
     pub async fn retrieve(&self, blob_id: BlobId) -> Result<AsyncSource<'_>> {
-        self.gorgon.retrieve_from(&self.storage, blob_id).await
+        self.gorgon
+            .retrieve_from(self.storage.as_ref(), blob_id)
+            .await
     }
 
     /// Store a file from the disk.
@@ -41,7 +45,7 @@ impl Client {
         options: &StoreOptions,
     ) -> Result<BlobId> {
         self.gorgon
-            .store_from_file_in(&self.storage, path, options)
+            .store_from_file_in(self.storage.as_ref(), path, options)
             .await
     }
 
@@ -57,11 +61,13 @@ impl Client {
     ) -> Result<BlobId> {
         let source = source.into();
 
-        self.gorgon.store_in(&self.storage, source, options).await
+        self.gorgon
+            .store_in(self.storage.as_ref(), source, options)
+            .await
     }
 
     /// Start a new transaction on the client.
-    pub fn start_transaction(self: &Arc<Self>) -> std::io::Result<Transaction> {
-        Transaction::new(Arc::clone(self))
+    pub fn start_transaction(&self) -> std::io::Result<Transaction> {
+        Transaction::new(self.gorgon.clone(), self.storage.clone())
     }
 }

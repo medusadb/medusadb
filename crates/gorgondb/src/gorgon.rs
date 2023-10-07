@@ -245,6 +245,48 @@ impl Gorgon {
             }
         })
     }
+
+    pub(crate) fn unstore_from<'s>(
+        &'s self,
+        storage: &'s (impl Retrieve + Unstore + Sync),
+        blob_id: BlobId,
+    ) -> BoxFuture<'s, Result<()>> {
+        Box::pin(async move {
+            match blob_id {
+                BlobId::SelfContained(_) => {}
+                BlobId::Ledger { blob_id, .. } => {
+                    tracing::debug!("Blob is a ledger with id `{blob_id}`.");
+
+                    let ledger_source = self.retrieve_from(storage, *blob_id).await?;
+                    let ledger =
+                        Ledger::async_read_from(ledger_source.get_async_read().await?).await?;
+
+                    match ledger {
+                        Ledger::LinearAggregate { blob_ids } => {
+                            tracing::debug!(
+                                "Ledger is a linear aggregate of {} blob ids.",
+                                blob_ids.len()
+                            );
+
+                            futures::future::join_all(
+                                blob_ids
+                                    .into_iter()
+                                    .map(|blob_id| self.unstore_from(storage, blob_id)),
+                            )
+                            .await
+                            .into_iter()
+                            .collect::<Result<Vec<_>>>()?;
+                        }
+                    }
+                }
+                BlobId::RemoteRef(remote_ref) => {
+                    storage.unstore(&remote_ref).await;
+                }
+            };
+
+            Ok(())
+        })
+    }
 }
 
 /// A trait for types that can retrieve remote blobs.
@@ -267,4 +309,14 @@ pub trait Store {
         remote_ref: &RemoteRef,
         source: crate::AsyncSource<'_>,
     ) -> crate::storage::Result<()>;
+}
+
+/// A trait for types that can unstore remote blobs.
+#[async_trait]
+pub trait Unstore {
+    /// Unstore a value.
+    ///
+    /// If `unstore` is called as many times as `store` was called for a value, the `store` is
+    /// effectively cancelled, exactly as if it did not happen.
+    async fn unstore(&self, remote_ref: &RemoteRef);
 }

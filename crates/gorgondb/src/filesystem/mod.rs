@@ -75,8 +75,8 @@ impl Filesystem {
                 }
                 Err(err) => {
                     tracing::warn!(
-                    "Failed to copy file using `reflink` ({err}): will fallback to in-memory copy."
-                );
+                        "Failed to copy file using `reflink` ({err}): will fallback to in-memory copy."
+                    );
                 }
             }
         }

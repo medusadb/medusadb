@@ -1,6 +1,7 @@
 //! An identifier type for remote references.
 
 use std::{
+    borrow::Cow,
     fmt::Display,
     io::{Read, Write},
     str::FromStr,
@@ -8,7 +9,6 @@ use std::{
 
 use base64::Engine;
 use byteorder::ReadBytesExt;
-use bytes::Bytes;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
@@ -37,7 +37,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub struct RemoteRef {
     pub(crate) ref_size: u64,
     pub(crate) hash_algorithm: HashAlgorithm,
-    pub(crate) hash: Bytes,
+    pub(crate) hash: Cow<'static, [u8]>,
 }
 
 impl RemoteRef {
