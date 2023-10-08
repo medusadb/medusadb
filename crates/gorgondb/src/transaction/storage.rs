@@ -38,25 +38,32 @@ impl Storage {
         })
     }
 
-    pub(crate) async fn commit(self) -> crate::storage::Result<()> {
+    pub(crate) async fn commit(self) -> crate::storage::Result<(), (Self, crate::storage::Error)> {
         let blobs = Arc::into_inner(self.blobs)
-            .expect("blobs should never have been cloned")
+            .expect("there should be only one active reference to this transaction storage")
             .into_inner();
+        let mut blobs_iter = blobs.into_iter();
 
-        let filesystem_storage = self.filesystem_storage;
-        let _filesystem_root = self._filesystem_root;
-        let base_storage = self.base_storage;
-
-        for (remote_ref, ref_counted_blob) in blobs {
-            match ref_counted_blob.data {
-                Some(data) => base_storage.store(&remote_ref, data.into()).await?,
-                None => match filesystem_storage.retrieve(&remote_ref).await? {
-                    Some(source) => {
-                        base_storage.store(&remote_ref, source.into()).await?
+        while let Some((remote_ref, ref_counted_blob)) = blobs_iter.next() {
+            if let Err(err) = match &ref_counted_blob.data {
+                Some(data) =>self.base_storage.store(&remote_ref, data.clone().into()).await,
+                None => match self.filesystem_storage.retrieve(&remote_ref).await {
+                    Ok(Some(source)) => {
+                        self.base_storage.store(&remote_ref, source.into()).await
                     }
-                    None => return Err(Error::DataCorruption(format!("the remote-ref `{remote_ref}` should exist in the local filesystem storage"))),
+                    Ok(None) => Err(Error::DataCorruption(format!("the remote-ref `{remote_ref}` should exist in the local filesystem storage"))),
+                    Err(err) => Err(err.into()),
                 },
-            };
+            } {
+                // Make sure we add back to to blobs the non-handled ones.
+                return Err((Self{
+                    disk_size_threshold: self.disk_size_threshold,
+                    blobs: Arc::new(RwLock::new(std::iter::once((remote_ref, ref_counted_blob)).chain(blobs_iter).collect())),
+                    filesystem_storage: self.filesystem_storage,
+                    _filesystem_root: self._filesystem_root,
+                    base_storage: self.base_storage,
+                }, err))
+            }
         }
 
         Ok(())

@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    gorgon::{Result, StoreOptions},
+    gorgon::{Error, Result, StoreOptions},
     AsyncSource, BlobId, Gorgon,
 };
 
@@ -98,9 +98,18 @@ impl Transaction {
     /// Commit the transaction, ensuring all its referenced blobs are persisted to its associated
     /// base storage.
     ///
-    /// If the commit fails, it is possible some values will have been copied while other may have
-    /// not.
-    pub async fn commit(self) -> Result<()> {
-        self.storage.commit().await.map_err(Into::into)
+    /// If the commit fails, it is possible some blobs will have been persisted while other may
+    /// have not. In this case, the transaction is guaranteed to only contain the blobs that could
+    /// not be persisted and it is safe to retry and commit the transaction.
+    pub async fn commit(self) -> Result<(), (Self, Error)> {
+        self.storage.commit().await.map_err(|(storage, err)| {
+            (
+                Self {
+                    storage,
+                    gorgon: self.gorgon,
+                },
+                err.into(),
+            )
+        })
     }
 }
