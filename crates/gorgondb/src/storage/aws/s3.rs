@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use async_compat::CompatExt;
 use aws_config::SdkConfig;
@@ -97,11 +97,17 @@ impl Storage {
         }
 
         let source = source.into();
-        let body: ByteStream = match source.into_data() {
-            Ok(data) => ByteStream::from(data),
-            Err(source) => match source.path() {
-                Some(path) => ByteStream::from_path(path).await.map_err(Error::new)?,
-                None => source.read_all_into_vec().await.map_err(Error::new)?.into(),
+        let body: ByteStream = match source.into_static_data() {
+            Ok(data) => ByteStream::from_static(data),
+            Err(source) => match source.into_data() {
+                Ok(data) => ByteStream::from(data),
+                Err(source) => match source.path() {
+                    Some(path) => ByteStream::from_path(path).await.map_err(Error::new)?,
+                    None => match source.read_all_into_memory().await.map_err(Error::new)? {
+                        Cow::Owned(v) => v.into(),
+                        Cow::Borrowed(s) => s.to_owned().into(),
+                    },
+                },
             },
         };
 
@@ -183,7 +189,7 @@ impl AsyncSource {
     }
 
     /// Read all the content from this source into a new buffer.
-    pub async fn read_all_into_vec(self) -> Result<Vec<u8>> {
+    pub async fn read_all_into_memory(self) -> Result<Vec<u8>> {
         let mut r = Self::get_async_read_impl(
             self.storage.semaphore.clone(),
             &self.storage.client,
@@ -192,14 +198,15 @@ impl AsyncSource {
         )
         .await?;
 
-        let mut data = vec![
-            0;
-            self.size
-                .try_into()
-                .expect("failed to convert u64 to usize")
-        ];
+        let data_size: usize = self
+            .size
+            .try_into()
+            .expect("failed to convert u64 to usize");
+        let mut data = Vec::with_capacity(data_size);
 
         r.read_to_end(&mut data).await.map_err(Error::new)?;
+
+        debug_assert_eq!(data.len(), data_size);
 
         Ok(data)
     }

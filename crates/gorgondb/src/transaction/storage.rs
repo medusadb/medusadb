@@ -46,7 +46,7 @@ impl Storage {
 
         while let Some((remote_ref, ref_counted_blob)) = blobs_iter.next() {
             if let Err(err) = match &ref_counted_blob.data {
-                Some(data) =>self.base_storage.store(&remote_ref, data.clone().into()).await,
+                Some(data) => self.base_storage.store(&remote_ref, data.clone().into()).await,
                 None => match self.filesystem_storage.retrieve(&remote_ref).await {
                     Ok(Some(source)) => {
                         self.base_storage.store(&remote_ref, source.into()).await
@@ -88,7 +88,7 @@ impl Store for Storage {
 
                     None
                 } else {
-                    Some(source.read_all_into_vec().await?.into())
+                    Some(source.read_all_into_owned_memory().await?)
                 };
 
                 entry.insert(RefCountedBlob::new(data));
@@ -136,7 +136,7 @@ impl Unstore for Storage {
         {
             // The entry exists already: if it has a single reference, we must delete it
             // entirely.
-            if entry.get().count == 0 {
+            if entry.get().is_last_ref() {
                 entry.remove();
             } else {
                 entry.into_mut().count -= 1;
@@ -154,5 +154,9 @@ struct RefCountedBlob {
 impl RefCountedBlob {
     fn new(data: Option<Cow<'static, [u8]>>) -> Self {
         Self { data, count: 0 }
+    }
+
+    fn is_last_ref(&self) -> bool {
+        self.count == 0
     }
 }

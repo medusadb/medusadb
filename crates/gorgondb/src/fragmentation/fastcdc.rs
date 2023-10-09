@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use futures::{AsyncRead, Stream, StreamExt, TryStream};
 use pin_project::pin_project;
 
@@ -76,7 +75,7 @@ impl Fastcdc {
     pub fn fragment<'r>(
         &self,
         r: impl AsyncRead + Unpin + 'r,
-    ) -> impl TryStream<Ok = Bytes, Error = super::Error> + 'r {
+    ) -> impl TryStream<Ok = Vec<u8>, Error = super::Error> + 'r {
         Fragmenter::new(r, self.min_size, self.avg_size, self.max_size)
     }
 }
@@ -95,7 +94,7 @@ impl<R: AsyncRead + Unpin> Fragmenter<R> {
 }
 
 impl<R: AsyncRead + Unpin> Stream for Fragmenter<R> {
-    type Item = Result<Bytes, Error>;
+    type Item = Result<Vec<u8>, Error>;
 
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
@@ -106,7 +105,7 @@ impl<R: AsyncRead + Unpin> Stream for Fragmenter<R> {
 
         stream
             .poll_next_unpin(cx)
-            .map_ok(|chunk| chunk.data.into())
+            .map_ok(|chunk| chunk.data)
             .map_err(Into::into)
     }
 }

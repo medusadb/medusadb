@@ -5,6 +5,7 @@ use std::{
 
 use futures::AsyncReadExt;
 use tokio::sync::Semaphore;
+use tracing::trace;
 
 use crate::{AsyncReadInit, BoxAsyncRead};
 
@@ -73,17 +74,24 @@ impl AsyncFileSource {
     }
 
     /// Read all the content of the file into memory.
-    pub async fn read_all_into_vec(self) -> std::io::Result<Vec<u8>> {
-        let mut data = vec![
-            0;
-            self.size
-                .try_into()
-                .expect("failed to convert u64 to usize")
-        ];
+    pub async fn read_all_into_memory(self) -> std::io::Result<Vec<u8>> {
+        let data_size: usize = self
+            .size
+            .try_into()
+            .expect("failed to convert u64 to usize");
+        let mut data = Vec::with_capacity(data_size);
+
+        trace!(
+            "Reading file at `{}` into a memory buffer of {} bytes.",
+            self.path.display(),
+            self.size,
+        );
 
         let mut r = Self::get_async_file_read(self.semaphore, &self.path).await?;
 
         r.read_to_end(&mut data).await?;
+
+        debug_assert_eq!(data.len(), data_size);
 
         Ok(data)
     }

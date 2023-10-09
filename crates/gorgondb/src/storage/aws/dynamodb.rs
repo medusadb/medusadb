@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use aws_config::SdkConfig;
 use aws_sdk_dynamodb::{primitives::Blob, types::AttributeValue};
 use tracing::debug;
@@ -70,11 +72,15 @@ impl Storage {
             (Self::PK, remote_ref.to_vec()),
             (
                 Self::DATA,
-                source
+                match source
                     .into()
-                    .read_all_into_vec()
+                    .read_all_into_memory()
                     .await
-                    .map_err(Error::new)?,
+                    .map_err(Error::new)?
+                {
+                    Cow::Owned(b) => b,
+                    Cow::Borrowed(s) => s.to_vec(),
+                },
             ),
         ]
         .into_iter()

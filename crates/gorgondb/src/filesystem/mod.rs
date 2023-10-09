@@ -15,7 +15,7 @@ mod async_file_source;
 pub use async_file_read::AsyncFileRead;
 pub use async_file_source::AsyncFileSource;
 
-use crate::AsyncSource;
+use crate::{storage::FilesystemStorage, AsyncSource};
 
 /// An interface to interact with the filesystem.
 ///
@@ -35,6 +35,11 @@ impl Default for Filesystem {
 }
 
 impl Filesystem {
+    /// Instantiate a new filesystem storage at the specified location.
+    pub fn new_storage(&self, root: impl Into<PathBuf>) -> std::io::Result<FilesystemStorage> {
+        FilesystemStorage::new(self.clone(), root)
+    }
+
     /// Load a file source from the disk.
     pub async fn load_source(
         &self,

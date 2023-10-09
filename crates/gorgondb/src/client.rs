@@ -1,5 +1,6 @@
 //! A ``Gorgon`` implements methods to read and write blobs of data.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,9 +16,9 @@ pub struct Client {
 
 impl Client {
     /// Instantiate a new `Gorgon` using the specified storage.
-    pub fn new(storage: Storage) -> Self {
+    pub fn new(storage: impl Into<Storage>) -> Self {
         let gorgon = Gorgon::default();
-        let storage = Arc::new(storage);
+        let storage = Arc::new(storage.into());
 
         Self { gorgon, storage }
     }
@@ -26,6 +27,16 @@ impl Client {
     pub async fn retrieve_to_file(&self, blob_id: BlobId, path: impl AsRef<Path>) -> Result<()> {
         self.gorgon
             .retrieve_to_file_from(self.storage.as_ref(), blob_id, path)
+            .await
+    }
+
+    /// Retrieve a value and read it in memory.
+    ///
+    /// If the value doesn't exist in the transaction itself, it will be looked-for in the base
+    /// storage instead.
+    pub async fn retrieve_to_memory(&self, blob_id: BlobId) -> Result<Cow<'static, [u8]>> {
+        self.gorgon
+            .retrieve_to_memory_from(self.storage.as_ref(), blob_id)
             .await
     }
 

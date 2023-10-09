@@ -42,7 +42,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 ///
 /// `Storage` uses static dispatch to call concrete implementations. They are designed to be cheap
 /// to clone.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Storage {
     /// Store files on the file-system.
     Filesystem(FilesystemStorage),
@@ -50,6 +50,19 @@ pub enum Storage {
     /// Store blobs in AWS S3 and DynamoDB.
     #[cfg(feature = "aws")]
     Aws(aws::AwsStorage),
+}
+
+impl From<FilesystemStorage> for Storage {
+    fn from(value: FilesystemStorage) -> Self {
+        Self::Filesystem(value)
+    }
+}
+
+#[cfg(feature = "aws")]
+impl From<aws::AwsStorage> for Storage {
+    fn from(value: aws::AwsStorage) -> Self {
+        Self::Aws(value)
+    }
 }
 
 #[async_trait]

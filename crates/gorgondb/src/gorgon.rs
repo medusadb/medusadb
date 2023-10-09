@@ -1,6 +1,9 @@
 //! A ``Gorgon`` implements methods to read and write blobs of data.
 
-use std::path::{Path, PathBuf};
+use std::{
+    borrow::Cow,
+    path::{Path, PathBuf},
+};
 
 use async_trait::async_trait;
 use futures::{future::BoxFuture, TryStreamExt};
@@ -30,6 +33,10 @@ pub enum Error {
     /// A fragmentation error occured.
     #[error("fragmentation error: {0}")]
     Fragmentation(#[from] crate::fragmentation::Error),
+
+    /// A remote reference does not exist.
+    #[error("a remote-reference was not found: {0}")]
+    RemoteRefNotFound(RemoteRef),
 }
 
 /// A convenience result type.
@@ -84,6 +91,29 @@ impl Gorgon {
             .map_err(Into::into)
     }
 
+    /// Retrieve a value from the specified storage and read it in memory.
+    ///
+    /// This is a convenience method that will use the most efficient method to store the value.
+    pub async fn retrieve_to_memory_from<'s>(
+        &'s self,
+        storage: &'s (impl Retrieve + Sync),
+        blob_id: BlobId,
+    ) -> Result<Cow<'static, [u8]>> {
+        let source = self.retrieve_from(storage, blob_id).await?;
+
+        let source_size: usize = source.size().try_into().unwrap();
+
+        let data = source.read_all_into_owned_memory().await?;
+
+        debug_assert_eq!(
+            data.len(),
+            source_size,
+            "data does not have the expected size"
+        );
+
+        Ok(data)
+    }
+
     /// Retrieve a value from the specified storage.
     #[instrument(level=Level::INFO, skip(self, storage, blob_id), fields(blob_id=blob_id.to_string()))]
     pub fn retrieve_from<'s>(
@@ -129,18 +159,20 @@ impl Gorgon {
                 }
                 BlobId::RemoteRef(remote_ref) => {
                     tracing::debug!(
-                        "Blob is stored remotely in ref `{remote_ref}`: fetching from storage..."
+                        "Blob points to {} bytes stored remotely in ref `{remote_ref}`: fetching from storage...", remote_ref.ref_size()
                     );
 
                     match storage.retrieve(&remote_ref).await? {
-                        Some(source) => source,
-                        None => {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::NotFound,
-                                "failed to retrieve non-existing remote ref `{remote_ref}`",
-                            )
-                            .into())
+                        Some(source) => {
+                            debug_assert_eq!(
+                                source.size(),
+                                remote_ref.ref_size(),
+                                "source has an unexpected size"
+                            );
+
+                            source
                         }
+                        None => return Err(Error::RemoteRefNotFound(remote_ref)),
                     }
                 }
             })
@@ -182,7 +214,13 @@ impl Gorgon {
             let ref_size = source.size();
 
             if ref_size < BlobId::MAX_SELF_CONTAINED_SIZE {
-                let data = source.read_all_into_vec().await?;
+                let data = match source.static_data() {
+                    Some(data) => Cow::Borrowed(data),
+                    None => match source.read_all_into_memory().await? {
+                        Cow::Owned(b) => Cow::Owned(b),
+                        Cow::Borrowed(s) => Cow::Owned(s.to_owned()),
+                    },
+                };
 
                 BlobId::self_contained(data).map_err(Into::into)
             } else if !options.disable_fragmentation

@@ -1,6 +1,7 @@
 //! An identifier type for data blobs.
 
 use std::{
+    borrow::Cow,
     fmt::Display,
     io::{Read, Write},
     pin::Pin,
@@ -9,7 +10,6 @@ use std::{
 
 use base64::Engine;
 use byteorder::ReadBytesExt;
-use bytes::Bytes;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Future};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
@@ -46,7 +46,7 @@ pub enum BlobId {
     /// The ``BlobId`` contains the data directly.
     ///
     /// This variant cannot hold more than 256 bytes.
-    SelfContained(Bytes),
+    SelfContained(Cow<'static, [u8]>),
 
     /// The ``BlobId`` is a hash to a blob of data stored elsewhere.
     RemoteRef(RemoteRef),
@@ -78,7 +78,7 @@ impl BlobId {
     /// If the data exceed 63 bytes, an error is returned.
     ///
     /// The data will be copied from the slice.
-    pub fn self_contained(buf: impl Into<Bytes>) -> Result<Self> {
+    pub fn self_contained(buf: impl Into<Cow<'static, [u8]>>) -> Result<Self> {
         let buf = buf.into();
 
         if buf.len() > 0x3f {
@@ -317,7 +317,7 @@ mod tests {
     fn test_blob_id_empty() {
         let expected = "AA=="; // Contains `vec[]`.
         let blob_id = BlobId::empty();
-        assert_eq!(blob_id, BlobId::SelfContained(Bytes::new()));
+        assert_eq!(blob_id, BlobId::SelfContained(Default::default()));
         assert_eq!(blob_id.to_string(), expected);
         assert_eq!(blob_id.size(), 0);
 

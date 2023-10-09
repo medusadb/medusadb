@@ -2,7 +2,6 @@
 
 mod fastcdc;
 
-use bytes::Bytes;
 use futures::{AsyncRead, TryStream};
 
 pub use self::fastcdc::Fastcdc;
@@ -52,7 +51,7 @@ impl FragmentationMethod {
     pub fn fragment<'r>(
         &self,
         r: impl AsyncRead + Unpin + 'r,
-    ) -> impl TryStream<Ok = Bytes, Error = Error> + 'r {
+    ) -> impl TryStream<Ok = Vec<u8>, Error = Error> + 'r {
         match self {
             Self::Fastcdc(fastcdc) => fastcdc.fragment(r),
         }

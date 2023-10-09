@@ -7,7 +7,7 @@ use hex::ToHex;
 use crate::{filesystem::AsyncFileSource, AsyncSource, Filesystem, RemoteRef};
 
 /// A storage that stores value on disk.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FilesystemStorage {
     filesystem: Filesystem,
     root: PathBuf,

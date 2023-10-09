@@ -42,7 +42,7 @@ impl Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// A storage that uses AWS S3 and DynamoDB.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AwsStorage {
     s3: Arc<S3Storage>,
     dynamodb: DynamoDbStorage,
@@ -137,10 +137,10 @@ impl<'d> AsyncSource<'d> {
 
     /// Transform the source in a buffer in memory, reading the entirety of the data first if
     /// necessary.
-    pub async fn read_all_into_vec(self) -> Result<Vec<u8>> {
+    pub async fn read_all_into_memory(self) -> Result<Cow<'d, [u8]>> {
         match self {
-            Self::DynamoDb(buf) => Ok(buf.to_vec()),
-            Self::S3(source) => source.read_all_into_vec().await,
+            Self::DynamoDb(buf) => Ok(buf),
+            Self::S3(source) => source.read_all_into_memory().await.map(Into::into),
         }
     }
 
