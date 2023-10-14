@@ -8,7 +8,9 @@ use crate::{AsyncFileSource, AsyncSourceChain};
 pub type BoxAsyncRead<'s> = Box<dyn AsyncRead + Send + Unpin + 's>;
 
 /// A source of data that can be read asynchronously.
-#[derive(Debug)]
+///
+/// An AsyncSource can be cheaply cloned.
+#[derive(Debug, Clone)]
 pub enum AsyncSource<'d> {
     /// The source is a static buffer in memory.
     Static(&'static [u8]),

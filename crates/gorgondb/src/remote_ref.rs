@@ -33,7 +33,9 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// # Handling remote-references
 ///
 /// Remote references are designed to be printable and - as such - parseable.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, DeserializeFromStr, SerializeDisplay)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, DeserializeFromStr, SerializeDisplay,
+)]
 pub struct RemoteRef {
     pub(crate) ref_size: u64,
     pub(crate) hash_algorithm: HashAlgorithm,

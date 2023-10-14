@@ -101,7 +101,7 @@ impl AwsStorage {
 }
 
 /// A source of data that comes from Aws.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AsyncSource<'d> {
     /// The source comes from AWS DynamoDB.
     DynamoDb(Cow<'d, [u8]>),

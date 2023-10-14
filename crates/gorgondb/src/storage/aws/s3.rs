@@ -125,7 +125,7 @@ impl Storage {
 }
 
 /// An async source that retrieves its data on AWS S3.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AsyncSource {
     size: u64,
     storage: Arc<Storage>,

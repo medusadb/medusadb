@@ -2,6 +2,7 @@
 
 #[cfg(feature = "aws")]
 mod aws;
+mod cache;
 mod filesystem;
 
 #[cfg(feature = "aws")]
@@ -9,9 +10,11 @@ pub use aws::{
     AsyncSource as AwsAsyncSource, AwsStorage, Error as AwsError, Result as AwsResult,
     S3AsyncSource as AwsS3AsyncSource,
 };
+pub use cache::Cache;
 pub use filesystem::FilesystemStorage;
 
 use async_trait::async_trait;
+use tracing::debug;
 
 use crate::{
     gorgon::{Retrieve, Store},
@@ -39,11 +42,77 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// A struct that can persist and recover values remotely.
-///
-/// `Storage` uses static dispatch to call concrete implementations. They are designed to be cheap
-/// to clone.
 #[derive(Debug)]
-pub enum Storage {
+pub struct Storage {
+    cache: Cache,
+    impl_: StorageImpl,
+}
+
+impl From<FilesystemStorage> for Storage {
+    fn from(value: FilesystemStorage) -> Self {
+        Self {
+            cache: Cache::default(),
+            impl_: StorageImpl::Filesystem(value),
+        }
+    }
+}
+
+#[cfg(feature = "aws")]
+impl From<aws::AwsStorage> for Storage {
+    fn from(value: aws::AwsStorage) -> Self {
+        Self {
+            impl_: StorageImpl::Aws(value),
+            cache: Cache::default(),
+        }
+    }
+}
+
+impl Storage {
+    /// Get the cache associated to this storage.
+    pub fn cache(&self) -> &Cache {
+        &self.cache
+    }
+
+    /// Get the cache associated to this storage.
+    pub fn cache_mut(&mut self) -> &mut Cache {
+        &mut self.cache
+    }
+}
+
+#[async_trait]
+impl Retrieve for Storage {
+    /// Retrieve a value
+    async fn retrieve<'s>(
+        &'s self,
+        remote_ref: &RemoteRef,
+    ) -> Result<Option<crate::AsyncSource<'s>>> {
+        if let Some(r) = self.cache.retrieve(remote_ref).await {
+            debug!("Found cache entry for `{remote_ref}`: reading from cache.");
+
+            return Ok(Some(r));
+        }
+
+        debug!("No cache entry was found for `{remote_ref}`: fetching the value upstream.");
+
+        match self.impl_.retrieve(remote_ref).await? {
+            Some(source) => self.cache.store(remote_ref, source).await.map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+#[async_trait]
+impl Store for Storage {
+    /// Store a value and ensures it has the proper remote ref.
+    async fn store(&self, remote_ref: &RemoteRef, source: crate::AsyncSource<'_>) -> Result<()> {
+        let source = self.cache.store(remote_ref, source).await?;
+        self.impl_.store(remote_ref, source).await
+    }
+}
+
+/// `Storage` uses static dispatch to call concrete implementations.
+#[derive(Debug)]
+enum StorageImpl {
     /// Store files on the file-system.
     Filesystem(FilesystemStorage),
 
@@ -52,21 +121,8 @@ pub enum Storage {
     Aws(aws::AwsStorage),
 }
 
-impl From<FilesystemStorage> for Storage {
-    fn from(value: FilesystemStorage) -> Self {
-        Self::Filesystem(value)
-    }
-}
-
-#[cfg(feature = "aws")]
-impl From<aws::AwsStorage> for Storage {
-    fn from(value: aws::AwsStorage) -> Self {
-        Self::Aws(value)
-    }
-}
-
 #[async_trait]
-impl Retrieve for Storage {
+impl Retrieve for StorageImpl {
     /// Retrieve a value
     async fn retrieve<'s>(
         &'s self,
@@ -81,7 +137,7 @@ impl Retrieve for Storage {
 }
 
 #[async_trait]
-impl Store for Storage {
+impl Store for StorageImpl {
     /// Store a value and ensures it has the proper remote ref.
     async fn store(&self, remote_ref: &RemoteRef, source: crate::AsyncSource<'_>) -> Result<()> {
         match self {

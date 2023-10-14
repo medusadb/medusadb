@@ -34,6 +34,7 @@ base64.workspace = true
 blake3.workspace = true
 byteorder.workspace = true
 clap = { workspace = true, optional = true }
+chrono.workspace = true
 fastcdc.workspace = true
 futures.workspace = true
 fs4.workspace = true

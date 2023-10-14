@@ -41,7 +41,9 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// storing data in GorgonDB.
 /// - A ledger ``BlobId`` is a ``BlobId`` that points to a list of other blob ids and represents big
 /// blobs of data separated in smaller chunks.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, DeserializeFromStr, SerializeDisplay)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, DeserializeFromStr, SerializeDisplay,
+)]
 pub enum BlobId {
     /// The ``BlobId`` contains the data directly.
     ///

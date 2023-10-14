@@ -1,11 +1,13 @@
+use std::sync::Arc;
+
 use futures::AsyncReadExt;
 
 use crate::{AsyncSource, BoxAsyncRead};
 
 /// A chain of async sources.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AsyncSourceChain<'d> {
-    sources: Vec<AsyncSource<'d>>,
+    sources: Arc<Vec<AsyncSource<'d>>>,
     size: u64,
 }
 
@@ -13,6 +15,7 @@ impl<'d> AsyncSourceChain<'d> {
     /// Instantiate a new chain of `AsyncSource`.
     pub fn new(sources: Vec<AsyncSource<'d>>) -> Self {
         let size = sources.iter().map(|s| s.size()).sum();
+        let sources = Arc::new(sources);
 
         Self { sources, size }
     }
@@ -30,7 +33,7 @@ impl<'d> AsyncSourceChain<'d> {
             .expect("failed to convert u64 to usize");
         let mut data = Vec::with_capacity(data_size);
 
-        for s in self.sources {
+        for s in self.sources.iter() {
             let mut r = s.get_async_read().await?;
             r.read_to_end(&mut data).await?;
         }

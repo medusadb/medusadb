@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use gorgondb::{gorgon::StoreOptions, storage::AwsStorage, BlobId, Storage};
+use gorgondb::{gorgon::StoreOptions, storage::AwsStorage, BlobId};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -43,11 +43,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let sdk_config = aws_config::load_from_env().await;
-    let storage = Storage::Aws(AwsStorage::new(
+    let storage = AwsStorage::new(
         &sdk_config,
         std::env::var("GORGONDB_AWS_S3_BUCKET_NAME").unwrap(),
         std::env::var("GORGONDB_AWS_DYNAMODB_TABLE_NAME").unwrap(),
-    ));
+    );
     //let storage = Storage::Filesystem(FilesystemStorage::new(filesystem.clone(), "test").unwrap());
 
     let gorgon = gorgondb::Client::new(storage);

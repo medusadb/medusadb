@@ -27,6 +27,7 @@ base85 = "2.0.0"
 blake3 = "1.4.1"
 byteorder = "1.4.3"
 bytes = "1.4.0"
+chrono = "0.4.31"
 clap = {version = "4.4.0", features = ["derive"]}
 fastcdc = {version = "3.1", features = ["futures"]}
 futures = "0.3.28"
