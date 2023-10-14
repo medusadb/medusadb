@@ -14,12 +14,21 @@ use super::AsyncFileRead;
 /// A source file on disk.
 #[derive(Debug, Clone)]
 pub struct AsyncFileSource {
+    semaphore: Arc<Semaphore>,
     path: PathBuf,
     size: u64,
-    semaphore: Arc<Semaphore>,
 }
 
 impl AsyncFileSource {
+    /// Instantiate a new `AsyncFileSource`.
+    pub(crate) fn new(semaphore: Arc<Semaphore>, path: PathBuf, size: u64) -> Self {
+        Self {
+            semaphore,
+            path,
+            size,
+        }
+    }
+
     /// Create an async file source for the file whose path is specified.
     ///
     /// Creating an `AsyncRead` from this source will require that the specified semaphore still

@@ -11,8 +11,8 @@ use humansize::{FormatSize, BINARY};
 use tracing::{instrument, Level};
 
 use crate::{
-    ledger::Ledger, AsyncSource, AsyncSourceChain, BlobId, Filesystem, FragmentationMethod,
-    HashAlgorithm, RemoteRef,
+    ledger::Ledger, AsyncFileSource, AsyncSource, AsyncSourceChain, BlobId, Filesystem,
+    FragmentationMethod, HashAlgorithm, RemoteRef,
 };
 
 /// An error type.
@@ -82,7 +82,7 @@ impl Gorgon {
         storage: &'s (impl Retrieve + Sync),
         blob_id: BlobId,
         path: impl AsRef<Path>,
-    ) -> Result<()> {
+    ) -> Result<AsyncFileSource> {
         let source = self.retrieve_from(storage, blob_id).await?;
 
         self.filesystem

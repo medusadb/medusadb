@@ -32,7 +32,7 @@ impl FilesystemStorage {
         self.filesystem.load_source(path).await
     }
 
-    /// Store a value on disk.
+    /// Store a value on disk and retrieve it right away.
     ///
     /// If the file already exists, it is assumed to exist and contain the expected value. As such,
     /// the function will return immediately, in success.
@@ -40,22 +40,17 @@ impl FilesystemStorage {
         &self,
         remote_ref: &RemoteRef,
         source: impl Into<AsyncSource<'_>>,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<AsyncFileSource> {
         let path = self.get_path(remote_ref);
 
-        if tokio::fs::try_exists(&path).await.map_err(|err| {
-            std::io::Error::new(
-                err.kind(),
-                format!("failed to check if file `{}` exists", path.display()),
-            )
-        })? {
-            return Ok(());
+        match self.filesystem.load_source(&path).await? {
+            Some(source) => Ok(source),
+            None => self
+                .filesystem
+                .save_source(path, source)
+                .await
+                .map_err(Into::into),
         }
-
-        self.filesystem
-            .save_source(path, source)
-            .await
-            .map_err(Into::into)
     }
 
     fn get_path(&self, remote_ref: &RemoteRef) -> PathBuf {

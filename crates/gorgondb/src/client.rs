@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::gorgon::{Result, StoreOptions};
-use crate::{AsyncSource, BlobId, Gorgon, Storage, Transaction};
+use crate::{AsyncFileSource, AsyncSource, BlobId, Gorgon, Storage, Transaction};
 
 /// A `Client` provides method to store and retrieve values.
 #[derive(Debug)]
@@ -24,7 +24,11 @@ impl Client {
     }
 
     /// Retrieve a value from a file on disk.
-    pub async fn retrieve_to_file(&self, blob_id: BlobId, path: impl AsRef<Path>) -> Result<()> {
+    pub async fn retrieve_to_file(
+        &self,
+        blob_id: BlobId,
+        path: impl AsRef<Path>,
+    ) -> Result<AsyncFileSource> {
         self.gorgon
             .retrieve_to_file_from(self.storage.as_ref(), blob_id, path)
             .await

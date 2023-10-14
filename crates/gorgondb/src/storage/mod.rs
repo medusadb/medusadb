@@ -141,7 +141,9 @@ impl Store for StorageImpl {
     /// Store a value and ensures it has the proper remote ref.
     async fn store(&self, remote_ref: &RemoteRef, source: crate::AsyncSource<'_>) -> Result<()> {
         match self {
-            Self::Filesystem(storage) => storage.store(remote_ref, source).await?,
+            Self::Filesystem(storage) => {
+                storage.store(remote_ref, source).await?;
+            }
             #[cfg(feature = "aws")]
             Self::Aws(storage) => storage.store(remote_ref, source).await?,
         }

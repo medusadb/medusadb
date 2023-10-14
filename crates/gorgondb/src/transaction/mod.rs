@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     gorgon::{Error, Result, StoreOptions},
-    AsyncSource, BlobId, Gorgon,
+    AsyncFileSource, AsyncSource, BlobId, Gorgon,
 };
 
 use self::storage::Storage;
@@ -44,7 +44,11 @@ impl Transaction {
     ///
     /// If the value doesn't exist in the transaction itself, it will be looked-for in the base
     /// storage instead.
-    pub async fn retrieve_to_file(&self, blob_id: BlobId, path: impl AsRef<Path>) -> Result<()> {
+    pub async fn retrieve_to_file(
+        &self,
+        blob_id: BlobId,
+        path: impl AsRef<Path>,
+    ) -> Result<AsyncFileSource> {
         self.gorgon
             .retrieve_to_file_from(&self.storage, blob_id, path)
             .await

@@ -40,6 +40,22 @@ impl Filesystem {
         FilesystemStorage::new(self.clone(), root)
     }
 
+    /// Instantiate a new filesystem storage suitable for caching.
+    ///
+    /// This storage will use an appropriate, OS-dependant location to store its values.
+    pub fn new_caching_storage(&self, suffix: &str) -> std::io::Result<FilesystemStorage> {
+        let root = dirs::cache_dir()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "could not determine OS cache directory".to_owned(),
+                )
+            })?
+            .join(suffix);
+
+        self.new_storage(root)
+    }
+
     /// Load a file source from the disk.
     pub async fn load_source(
         &self,
@@ -51,11 +67,13 @@ impl Filesystem {
     }
 
     /// Store the content of an `AsyncSource` on disk.
+    ///
+    /// Returns an AsyncFileSource pointing to it.
     pub async fn save_source(
         &self,
         path: impl AsRef<Path>,
         source: impl Into<AsyncSource<'_>>,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<AsyncFileSource> {
         let path = path.as_ref();
         let source = source.into();
 
@@ -76,7 +94,11 @@ impl Filesystem {
 
             match reflink(source_path, path) {
                 Ok(()) => {
-                    return Ok(());
+                    return Ok(AsyncFileSource::new(
+                        self.semaphore.clone(),
+                        path.into(),
+                        source.size(),
+                    ));
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -134,7 +156,11 @@ impl Filesystem {
                     )
                 })?;
 
-                Ok(())
+                Ok(AsyncFileSource::new(
+                    self.semaphore.clone(),
+                    path.into(),
+                    source.size(),
+                ))
             }
             Err(err) => Err(std::io::Error::new(
                 err.kind(),

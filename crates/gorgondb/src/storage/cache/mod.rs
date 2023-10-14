@@ -5,8 +5,11 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
+use tracing::warn;
 
 use crate::RemoteRef;
+
+use super::FilesystemStorage;
 
 /// An storage that stores a subset of its elements in memory, keeping first the most recently
 /// referenced ones.
@@ -14,6 +17,7 @@ use crate::RemoteRef;
 pub struct Cache {
     max_size: usize,
     impl_: Arc<Mutex<CacheImpl>>,
+    filesystem_storage: Option<FilesystemStorage>,
 }
 
 impl Default for Cache {
@@ -21,6 +25,7 @@ impl Default for Cache {
         Self {
             max_size: Self::DEFAULT_MAX_SIZE,
             impl_: Default::default(),
+            filesystem_storage: None,
         }
     }
 }
@@ -31,6 +36,36 @@ impl Cache {
     /// Clear the cache.
     pub fn clear(&self) {
         self.impl_.lock().expect("failed to lock").clear();
+    }
+
+    /// Set the cache's maximum size for in-memory values.
+    ///
+    /// If the maximum size is decremented, pruning of values happens immediately.
+    ///
+    /// `set_max_size` does not affect the disk cache.
+    pub fn set_max_size(&mut self, mut max_size: usize) -> &mut Self {
+        std::mem::swap(&mut self.max_size, &mut max_size);
+
+        if max_size > self.max_size {
+            self.impl_
+                .lock()
+                .expect("failed to lock")
+                .prune(self.max_size);
+        }
+
+        self
+    }
+
+    /// Set or reset the filesystem storage used by this cache instance.
+    ///
+    /// If a filesystem storage is set, it will be used to store all values, inconditionally.
+    pub fn set_filesystem_storage(
+        &mut self,
+        filesystem_storage: Option<FilesystemStorage>,
+    ) -> &mut Self {
+        self.filesystem_storage = filesystem_storage;
+
+        self
     }
 
     /// Set the expiration respite values on the cache.
@@ -47,27 +82,50 @@ impl Cache {
         self
     }
 
-    /// Set the cache's maximum size.
-    ///
-    /// If the maximum size is decremented, pruning of values happens immediately.
-    pub fn set_max_size(&mut self, mut max_size: usize) -> &mut Self {
-        std::mem::swap(&mut self.max_size, &mut max_size);
-
-        if max_size > self.max_size {
-            self.impl_
-                .lock()
-                .expect("failed to lock")
-                .prune(self.max_size);
-        }
-
-        self
-    }
-
     /// Retrieve the value from the cache, if it exists.
     pub async fn retrieve<'s>(&'s self, remote_ref: &RemoteRef) -> Option<crate::AsyncSource<'s>> {
-        let mut impl_ = self.impl_.lock().expect("failed to lock");
+        let ref_size: usize = remote_ref
+            .ref_size()
+            .try_into()
+            .expect("cannot convert u64 to usize");
 
-        impl_.get_and_extend(remote_ref).map(Into::into)
+        if ref_size <= self.max_size {
+            let mut impl_ = self.impl_.lock().expect("failed to lock");
+
+            if let Some(data) = impl_.get_and_extend(remote_ref) {
+                return Some(data.into());
+            }
+        }
+
+        // If we have a filesystem storage, use it as a fallback to the memory one.
+        if let Some(filesystem_storage) = &self.filesystem_storage {
+            return match filesystem_storage.retrieve(remote_ref).await {
+                Ok(Some(source)) => match source.read_all_into_memory().await {
+                    Ok(data) => {
+                        // We got the data from the filesystem: persist it to memory.
+                        let data: Cow<'_, [u8]> = Cow::Owned(data);
+
+                        let mut impl_ = self.impl_.lock().expect("failed to lock");
+
+                        impl_.store(remote_ref.clone(), data.clone());
+                        Some(data.into())
+                    }
+                    Err(err) => {
+                        warn!("Failed to read from filesystem storage: {err}");
+
+                        None
+                    }
+                },
+                Ok(None) => None,
+                Err(err) => {
+                    warn!("Failed to retrieve value from filesystem cache: {err}");
+
+                    None
+                }
+            };
+        }
+
+        None
     }
 
     /// Store the value in the cache and returns an `AsyncSource` to the cache entry.
@@ -88,12 +146,33 @@ impl Cache {
 
             assert_eq!(data.len(), ref_size, "data size does not match remote ref");
 
-            let mut impl_ = self.impl_.lock().expect("failed to lock");
+            {
+                let mut impl_ = self.impl_.lock().expect("failed to lock");
 
-            impl_.store(remote_ref.clone(), data.clone());
-            impl_.prune(self.max_size);
+                impl_.store(remote_ref.clone(), data.clone());
+                impl_.prune(self.max_size);
+            }
+
+            if let Some(filesystem_storage) = &self.filesystem_storage {
+                filesystem_storage.store(remote_ref, data.clone()).await?;
+            }
 
             Ok(data.into())
+        } else if let Some(filesystem_storage) = &self.filesystem_storage {
+            match source.data() {
+                Some(data) => {
+                    // If the source is already in memory: don't use the filesystem source as a
+                    // result as it certainly be slower.
+                    filesystem_storage.store(remote_ref, data).await?;
+
+                    Ok(source)
+                }
+                None => filesystem_storage
+                    .store(remote_ref, source)
+                    .await
+                    .map(Into::into)
+                    .map_err(Into::into),
+            }
         } else {
             Ok(source)
         }
