@@ -1,4 +1,12 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.gorgondb]]
+who = "Julien Kauffmann <julienkauffmann85+github@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.0.1"
+
+[[audits.medusadb]]
+who = "Julien Kauffmann <julienkauffmann85+github@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.0.1"

@@ -1,2 +1,10 @@
 
 # cargo-vet imports lock
+
+[[unpublished.gorgondb]]
+version = "0.0.2"
+audited_as = "0.0.1"
+
+[[unpublished.medusadb]]
+version = "0.0.2"
+audited_as = "0.0.1"

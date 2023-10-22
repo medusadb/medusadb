@@ -4,6 +4,12 @@
 [cargo-vet]
 version = "0.8"
 
+[policy.gorgondb]
+audit-as-crates-io = true
+
+[policy.medusadb]
+audit-as-crates-io = true
+
 [[exemptions.addr2line]]
 version = "0.21.0"
 criteria = "safe-to-deploy"
@@ -825,7 +831,7 @@ version = "0.3.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.tracing]]
-version = "0.1.39"
+version = "0.1.40"
 criteria = "safe-to-deploy"
 
 [[exemptions.tracing-attributes]]
