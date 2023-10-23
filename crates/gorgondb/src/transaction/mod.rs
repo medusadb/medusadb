@@ -46,7 +46,7 @@ impl Transaction {
     /// storage instead.
     pub async fn retrieve_to_file(
         &self,
-        blob_id: BlobId,
+        blob_id: &BlobId,
         path: impl AsRef<Path>,
     ) -> Result<AsyncFileSource> {
         self.gorgon
@@ -58,7 +58,10 @@ impl Transaction {
     ///
     /// If the value doesn't exist in the transaction itself, it will be looked-for in the base
     /// storage instead.
-    pub async fn retrieve_to_memory(&self, blob_id: BlobId) -> Result<Cow<'static, [u8]>> {
+    pub async fn retrieve_to_memory<'s>(
+        &'s self,
+        blob_id: &'s BlobId,
+    ) -> Result<Cow<'static, [u8]>> {
         self.gorgon
             .retrieve_to_memory_from(&self.storage, blob_id)
             .await
@@ -68,7 +71,7 @@ impl Transaction {
     ///
     /// If the value doesn't exist in the transaction itself, it will be looked-for in the base
     /// storage instead.
-    pub async fn retrieve(&self, blob_id: BlobId) -> Result<AsyncSource<'_>> {
+    pub async fn retrieve<'s>(&'s self, blob_id: &'s BlobId) -> Result<AsyncSource<'s>> {
         self.gorgon.retrieve_from(&self.storage, blob_id).await
     }
 
@@ -106,7 +109,7 @@ impl Transaction {
     /// not actually be stored anywhere.
     ///
     /// Unstoring a value that wasn't stored is a no-op.
-    pub async fn unstore(&self, blob_id: BlobId) -> Result<()> {
+    pub async fn unstore(&self, blob_id: &BlobId) -> Result<()> {
         self.gorgon.unstore_from(&self.storage, blob_id).await
     }
 
@@ -163,7 +166,7 @@ mod tests {
             .unwrap();
 
         // Sanity-check: the buffer A can be read in the client.
-        let buf = client.retrieve_to_memory(id_a.clone()).await.unwrap();
+        let buf = client.retrieve_to_memory(&id_a).await.unwrap();
         assert_eq!(buf, TEST_BUFFER_A);
 
         // Start two different transactions.
@@ -190,7 +193,7 @@ mod tests {
 
         // We un-write the buffer B once, leaving still one reference to it.
         assert_eq!(id_b, id_b_2);
-        transaction_one.unstore(id_b_2).await.unwrap();
+        transaction_one.unstore(&id_b_2).await.unwrap();
 
         // We write buffers C and D to the transaction two.
         let id_c = transaction_two
@@ -210,28 +213,22 @@ mod tests {
 
         // We un-write buffer D, leaving a zero reference count, effectively deleting the value
         // from the transaction.
-        transaction_two.unstore(id_d.clone()).await.unwrap();
+        transaction_two.unstore(&id_d).await.unwrap();
 
         // Try to read buffer A through transaction one: this should succeed, as the transaction
         // uses the client storage as a fallback storage.
-        let buf = transaction_one
-            .retrieve_to_memory(id_a.clone())
-            .await
-            .unwrap();
+        let buf = transaction_one.retrieve_to_memory(&id_a).await.unwrap();
         assert_eq!(buf, TEST_BUFFER_A);
 
         // Reading buffer B from transaction one should work, as the entry still has a positive
         // reference count in that transaction.
-        let buf = transaction_one
-            .retrieve_to_memory(id_b.clone())
-            .await
-            .unwrap();
+        let buf = transaction_one.retrieve_to_memory(&id_b).await.unwrap();
         assert_eq!(buf, TEST_BUFFER_B);
 
         // Reading buffer C from transaction one should fail, as the entry never existed there.
         assert!(matches!(
             transaction_one
-                .retrieve_to_memory(id_c.clone())
+                .retrieve_to_memory(&id_c)
                 .await
                 .unwrap_err(),
             Error::RemoteRefNotFound(remote_ref) if id_c == BlobId::RemoteRef(remote_ref.clone())
@@ -239,17 +236,14 @@ mod tests {
 
         // Reading buffer C from transaction two should work, as the entry still has a positive
         // reference count in that transaction.
-        let buf = transaction_two
-            .retrieve_to_memory(id_c.clone())
-            .await
-            .unwrap();
+        let buf = transaction_two.retrieve_to_memory(&id_c).await.unwrap();
         assert_eq!(buf, TEST_BUFFER_C);
 
         // Reading buffer D from transaction two should fail, as the entry no longer has
         // references.
         assert!(matches!(
             transaction_one
-                .retrieve_to_memory(id_d.clone())
+                .retrieve_to_memory(&id_d)
                 .await
                 .unwrap_err(),
             Error::RemoteRefNotFound(remote_ref) if id_d == BlobId::RemoteRef(remote_ref.clone())
@@ -258,7 +252,7 @@ mod tests {
         // Reading buffer B from client should fail, as the entry was never commited there.
         assert!(matches!(
             client
-                .retrieve_to_memory(id_b.clone())
+                .retrieve_to_memory(&id_b)
                 .await
                 .unwrap_err(),
             Error::RemoteRefNotFound(remote_ref) if id_b == BlobId::RemoteRef(remote_ref.clone())
@@ -270,15 +264,12 @@ mod tests {
             .expect("failed to commit transaction one");
 
         // The client can now read buffer B as the transaction one was committed.
-        let buf = client.retrieve_to_memory(id_b.clone()).await.unwrap();
+        let buf = client.retrieve_to_memory(&id_b).await.unwrap();
         assert_eq!(buf, TEST_BUFFER_B);
 
         // The transaction two can also read buffer B, as the transaction one was committed and it
         // uses the client storage as a fallback storage.
-        let buf = transaction_two
-            .retrieve_to_memory(id_b.clone())
-            .await
-            .unwrap();
+        let buf = transaction_two.retrieve_to_memory(&id_b).await.unwrap();
         assert_eq!(buf, TEST_BUFFER_B);
 
         transaction_two
@@ -287,14 +278,14 @@ mod tests {
             .expect("failed to commit transaction two");
 
         // The client can now read buffer B as the transaction one was committed.
-        let buf = client.retrieve_to_memory(id_c.clone()).await.unwrap();
+        let buf = client.retrieve_to_memory(&id_c).await.unwrap();
         assert_eq!(buf, TEST_BUFFER_C);
 
         // Reading buffer D from client should fail, as the entry had a zero reference count before
         // commit, and was hence never committed.
         assert!(matches!(
             client
-                .retrieve_to_memory(id_d.clone())
+                .retrieve_to_memory(&id_d)
                 .await
                 .unwrap_err(),
             Error::RemoteRefNotFound(remote_ref) if id_d == BlobId::RemoteRef(remote_ref.clone())

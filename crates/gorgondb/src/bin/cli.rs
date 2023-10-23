@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{blob_id}");
         }
         Command::Retrieve { blob_id, path } => {
-            gorgon.retrieve_to_file(blob_id, path).await?;
+            gorgon.retrieve_to_file(&blob_id, path).await?;
         }
     }
 

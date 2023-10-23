@@ -28,6 +28,7 @@ pub mod filesystem;
 pub mod fragmentation;
 pub mod gorgon;
 pub mod hash_algorithm;
+pub mod indexing;
 mod ledger;
 pub mod remote_ref;
 pub mod storage;

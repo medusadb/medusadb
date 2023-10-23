@@ -80,7 +80,7 @@ impl Gorgon {
     pub async fn retrieve_to_file_from<'s>(
         &'s self,
         storage: &'s (impl Retrieve + Sync),
-        blob_id: BlobId,
+        blob_id: &'s BlobId,
         path: impl AsRef<Path>,
     ) -> Result<AsyncFileSource> {
         let source = self.retrieve_from(storage, blob_id).await?;
@@ -97,7 +97,7 @@ impl Gorgon {
     pub async fn retrieve_to_memory_from<'s>(
         &'s self,
         storage: &'s (impl Retrieve + Sync),
-        blob_id: BlobId,
+        blob_id: &'s BlobId,
     ) -> Result<Cow<'static, [u8]>> {
         let source = self.retrieve_from(storage, blob_id).await?;
 
@@ -116,7 +116,7 @@ impl Gorgon {
 
     /// Retrieve a value from the specified storage.
     #[instrument(level=Level::INFO, skip(self, storage, blob_id), fields(blob_id=blob_id.to_string()))]
-    pub fn retrieve_from<'s>(
+    fn retrieve_from_owned<'s>(
         &'s self,
         storage: &'s (impl Retrieve + Sync),
         blob_id: BlobId,
@@ -131,7 +131,7 @@ impl Gorgon {
                 BlobId::Ledger { blob_id, .. } => {
                     tracing::debug!("Blob is a ledger with id `{blob_id}`.");
 
-                    let ledger_source = self.retrieve_from(storage, *blob_id).await?;
+                    let ledger_source = self.retrieve_from_owned(storage, *blob_id).await?;
                     let ledger =
                         Ledger::async_read_from(ledger_source.get_async_read().await?).await?;
 
@@ -145,7 +145,7 @@ impl Gorgon {
                             let sources = futures::future::join_all(
                                 blob_ids
                                     .into_iter()
-                                    .map(|blob_id| self.retrieve_from(storage, blob_id)),
+                                    .map(|blob_id| self.retrieve_from_owned(storage, blob_id)),
                             )
                             .await
                             .into_iter()
@@ -173,6 +173,71 @@ impl Gorgon {
                             source
                         }
                         None => return Err(Error::RemoteRefNotFound(remote_ref)),
+                    }
+                }
+            })
+        })
+    }
+
+    /// Retrieve a value from the specified storage.
+    #[instrument(level=Level::INFO, skip(self, storage, blob_id), fields(blob_id=blob_id.to_string()))]
+    pub fn retrieve_from<'s>(
+        &'s self,
+        storage: &'s (impl Retrieve + Sync),
+        blob_id: &'s BlobId,
+    ) -> BoxFuture<Result<AsyncSource<'s>>> {
+        Box::pin(async move {
+            Ok(match blob_id {
+                BlobId::SelfContained(buf) => {
+                    tracing::debug!("Blob is self-contained: retrieving from memory.");
+
+                    buf.clone().into()
+                }
+                BlobId::Ledger { blob_id, .. } => {
+                    tracing::debug!("Blob is a ledger with id `{blob_id}`.");
+
+                    let ledger_source = self.retrieve_from(storage, blob_id).await?;
+                    let ledger =
+                        Ledger::async_read_from(ledger_source.get_async_read().await?).await?;
+
+                    match ledger {
+                        Ledger::LinearAggregate { blob_ids } => {
+                            tracing::debug!(
+                                "Ledger is a linear aggregate of {} blob ids.",
+                                blob_ids.len()
+                            );
+
+                            let sources = futures::future::join_all(
+                                blob_ids
+                                    .into_iter()
+                                    .map(|blob_id| self.retrieve_from_owned(storage, blob_id)),
+                            )
+                            .await
+                            .into_iter()
+                            .collect::<Result<Vec<_>>>()?;
+
+                            tracing::debug!("Got all sources from ledger.");
+
+                            AsyncSourceChain::new(sources).into()
+                        }
+                    }
+                }
+                BlobId::RemoteRef(remote_ref) => {
+                    tracing::debug!(
+                        "Blob points to {} bytes stored remotely in ref `{remote_ref}`: fetching from storage...", remote_ref.ref_size()
+                    );
+
+                    match storage.retrieve(remote_ref).await? {
+                        Some(source) => {
+                            debug_assert_eq!(
+                                source.size(),
+                                remote_ref.ref_size(),
+                                "source has an unexpected size"
+                            );
+
+                            source
+                        }
+                        None => return Err(Error::RemoteRefNotFound(remote_ref.clone())),
                     }
                 }
             })
@@ -287,7 +352,7 @@ impl Gorgon {
     pub(crate) fn unstore_from<'s>(
         &'s self,
         storage: &'s (impl Retrieve + Unstore + Sync),
-        blob_id: BlobId,
+        blob_id: &'s BlobId,
     ) -> BoxFuture<'s, Result<()>> {
         Box::pin(async move {
             match blob_id {
@@ -295,7 +360,7 @@ impl Gorgon {
                 BlobId::Ledger { blob_id, .. } => {
                     tracing::debug!("Blob is a ledger with id `{blob_id}`.");
 
-                    let ledger_source = self.retrieve_from(storage, *blob_id).await?;
+                    let ledger_source = self.retrieve_from(storage, blob_id).await?;
                     let ledger =
                         Ledger::async_read_from(ledger_source.get_async_read().await?).await?;
 
@@ -308,7 +373,7 @@ impl Gorgon {
 
                             futures::future::join_all(
                                 blob_ids
-                                    .into_iter()
+                                    .iter()
                                     .map(|blob_id| self.unstore_from(storage, blob_id)),
                             )
                             .await
@@ -318,7 +383,7 @@ impl Gorgon {
                     }
                 }
                 BlobId::RemoteRef(remote_ref) => {
-                    storage.unstore(&remote_ref).await;
+                    storage.unstore(remote_ref).await;
                 }
             };
 
