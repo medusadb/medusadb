@@ -86,17 +86,10 @@ impl<KeyElem: Ord, Meta> TreeBranch<KeyElem, Meta> {
         }
     }
 
-    /// Find the children with the specified key.
-    ///
-    /// If the children is not found, an error is returned containing the index at which it should
-    /// have been found.
+    /// Find the entry for the children with the specified key.
     pub fn entry(&mut self, key: KeyElem) -> TreeBranchEntry<'_, KeyElem, Meta> {
         match self.children.binary_search_by(|item| item.0.cmp(&key)) {
-            Ok(idx) => TreeBranchEntry::Occupied(TreeBranchOccupiedEntry {
-                branch: self,
-                idx,
-                key,
-            }),
+            Ok(idx) => TreeBranchEntry::Occupied(TreeBranchOccupiedEntry { branch: self, idx }),
             Err(idx) => TreeBranchEntry::Vacant(TreeBranchVacantEntry {
                 branch: self,
                 idx,
@@ -105,22 +98,24 @@ impl<KeyElem: Ord, Meta> TreeBranch<KeyElem, Meta> {
         }
     }
 
-    /// Get a child value that is is guaranteed to be present.
-    pub fn get_existing(&self, key: &KeyElem) -> &BlobId {
+    /// Find the occupied entry for the children with the specified key.
+    pub fn occupied_entry(
+        &mut self,
+        key: &KeyElem,
+    ) -> Option<TreeBranchOccupiedEntry<'_, KeyElem, Meta>> {
         match self.children.binary_search_by(|item| item.0.cmp(key)) {
-            Ok(idx) => &self.children[idx].1,
-            Err(_) => unreachable!("key should exist"),
+            Ok(idx) => Some(TreeBranchOccupiedEntry { branch: self, idx }),
+            Err(_) => None,
         }
     }
 
     /// Replace a child into the branch, that is guaranteed to already be present.
     ///
     /// Returns the previous value.
-    pub fn replace_existing(&mut self, key: KeyElem, id: BlobId) -> BlobId {
-        match self.entry(key) {
-            TreeBranchEntry::Occupied(mut entry) => entry.replace(id),
-            TreeBranchEntry::Vacant(_) => unreachable!("key should exist"),
-        }
+    pub fn replace_existing(&mut self, key: &KeyElem, id: BlobId) -> BlobId {
+        self.occupied_entry(key)
+            .expect("key should exist")
+            .replace(id)
     }
 
     /// Insert a child into the branch, that is guaranteed to not exist yet.
@@ -145,15 +140,9 @@ pub enum TreeBranchEntry<'b, KeyElem, Meta> {
 pub struct TreeBranchOccupiedEntry<'b, KeyElem, Meta> {
     branch: &'b mut TreeBranch<KeyElem, Meta>,
     idx: usize,
-    key: KeyElem,
 }
 
 impl<'b, KeyElem, Meta> TreeBranchOccupiedEntry<'b, KeyElem, Meta> {
-    /// Get the key associated to the entry.
-    pub fn into_key_elem(self) -> KeyElem {
-        self.key
-    }
-
     /// Get the value associated to the entry.
     pub fn value(&self) -> &BlobId {
         &self
@@ -177,13 +166,6 @@ impl<'b, KeyElem, Meta> TreeBranchOccupiedEntry<'b, KeyElem, Meta> {
 
         id
     }
-
-    /// Remove the value in the occupied entry, returning it as well as the original node.
-    pub fn remove(self) -> (KeyElem, BlobId) {
-        let TreeItem(key, id) = self.branch.children.remove(self.idx);
-
-        (key, id)
-    }
 }
 
 #[derive(Debug)]
@@ -194,11 +176,6 @@ pub struct TreeBranchVacantEntry<'b, KeyElem, Meta> {
 }
 
 impl<'b, KeyElem, Meta> TreeBranchVacantEntry<'b, KeyElem, Meta> {
-    /// Turn the entry into its contained key.
-    pub fn into_key_elem(self) -> KeyElem {
-        self.key
-    }
-
     /// Insert a value in the vacant entry.
     pub fn insert(self, id: BlobId) {
         self.branch
@@ -255,7 +232,7 @@ pub enum TreePathElementError {
 }
 
 /// A tree path element that has a binary value with a striclty positive size.
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BinaryTreePathElement(#[serde(with = "serde_binary_tree_path_elem")] pub Bytes);
 
 mod serde_binary_tree_path_elem {
@@ -327,19 +304,21 @@ impl BinaryTreePathElement {
 
 /// A search stack that is never empty.
 #[derive(Debug, Clone)]
-pub struct TreeSearchStack<KeyElem, Meta>(Vec<(KeyElem, TreeBranch<KeyElem, Meta>)>);
-
-impl<KeyElem: Default, Meta> TreeSearchStack<KeyElem, Meta> {
-    /// Instantiate a new stack starting from the specified node.
-    pub fn new(root: TreeBranch<KeyElem, Meta>) -> Self {
-        Self(vec![(Default::default(), root)])
-    }
-}
+pub struct TreeSearchStack<KeyElem, Meta>(Vec<(TreeBranch<KeyElem, Meta>, KeyElem)>);
 
 impl<KeyElem, Meta> TreeSearchStack<KeyElem, Meta> {
+    /// Instantiate a new stack starting from the specified node.
+    pub fn new(root: TreeBranch<KeyElem, Meta>, child_key: KeyElem) -> Self {
+        Self(vec![(root, child_key)])
+    }
+
     /// Push a new item to the stack.
-    pub fn push(&mut self, elem: impl Into<KeyElem>, node: TreeBranch<KeyElem, Meta>) -> &mut Self {
-        self.0.push((elem.into(), node));
+    pub fn push(
+        &mut self,
+        branch: TreeBranch<KeyElem, Meta>,
+        elem: impl Into<KeyElem>,
+    ) -> &mut Self {
+        self.0.push((branch, elem.into()));
 
         self
     }
@@ -347,7 +326,7 @@ impl<KeyElem, Meta> TreeSearchStack<KeyElem, Meta> {
     /// Pop an item from the stack.
     ///
     /// If the last element is popped, the stack is not returned.
-    pub fn pop(mut self) -> (Option<Self>, (KeyElem, TreeBranch<KeyElem, Meta>)) {
+    pub fn pop(mut self) -> (Option<Self>, (TreeBranch<KeyElem, Meta>, KeyElem)) {
         let value = self.0.pop().expect("stack cannot be empty");
 
         if self.0.is_empty() {
@@ -357,26 +336,40 @@ impl<KeyElem, Meta> TreeSearchStack<KeyElem, Meta> {
         }
     }
 
-    /// Get the top element in the stack.
-    pub fn top(&self) -> &TreeBranch<KeyElem, Meta> {
-        &self.0.last().expect("stack cannot be empty").1
+    /// Get the top branch in the stack.
+    pub fn top_branch(&self) -> &TreeBranch<KeyElem, Meta> {
+        &self.0.last().expect("stack cannot be empty").0
     }
 
-    /// Get the top element in the stack.
-    pub fn top_mut(&mut self) -> &mut TreeBranch<KeyElem, Meta> {
-        &mut self.0.last_mut().expect("stack cannot be empty").1
+    /// Get the top branch in the stack.
+    pub fn top_branch_mut(&mut self) -> &mut TreeBranch<KeyElem, Meta> {
+        &mut self.0.last_mut().expect("stack cannot be empty").0
+    }
+
+    /// Get the top child key in the stack.
+    pub fn top_child_key(&self) -> &KeyElem {
+        &self.0.last().expect("stack cannot be empty").1
     }
 
     /// Convert the stack into a path.
     pub fn into_path(self) -> TreePath<KeyElem> {
-        TreePath(self.0.into_iter().map(|(k, _)| k).collect())
+        TreePath(self.0.into_iter().map(|(_, k)| k).collect())
+    }
+}
+
+impl<KeyElem: Ord, Meta> TreeSearchStack<KeyElem, Meta> {
+    /// Get the top occupied entry.
+    pub fn top_occupied_entry(&mut self) -> Option<TreeBranchOccupiedEntry<'_, KeyElem, Meta>> {
+        let top = self.0.last_mut().expect("stack cannot be empty");
+
+        top.0.occupied_entry(&top.1)
     }
 }
 
 impl<KeyElem: Clone, Meta> TreeSearchStack<KeyElem, Meta> {
     /// Convert the stack into a path.
     pub fn as_path(&self) -> TreePath<KeyElem> {
-        TreePath(self.0.iter().map(|(k, _)| k).cloned().collect())
+        TreePath(self.0.iter().map(|(_, k)| k).cloned().collect())
     }
 }
 
@@ -387,16 +380,10 @@ pub enum TreeSearchResult<KeyElem, Meta> {
     Found {
         /// The stack that led to the found entry.
         stack: TreeSearchStack<KeyElem, Meta>,
-
-        /// The entry that was found on the top node.
-        found_key: KeyElem,
     },
     Missing {
         /// The stack that led to the found entry.
         stack: TreeSearchStack<KeyElem, Meta>,
-
-        /// The entry that was missing on the top node.
-        missing_key: KeyElem,
 
         /// The next key, if there is one.
         next_key: Option<KeyElem>,

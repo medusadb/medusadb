@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{gorgon::StoreOptions, BlobId, Transaction};
 
-use super::{tree::TreeBranchEntry, BinaryTreePath, BinaryTreePathElement};
+use super::{BinaryTreePath, BinaryTreePathElement};
 
 /// A trait for types that can be used as a fixed-size key.
 pub trait FixedSizeKey: Sized + Ord + Eq {
@@ -161,12 +161,14 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         let count_diff: u64;
         let size_diff: SizeUpdate;
 
-        let (mut stack, mut child_key) = match self.search(key).await? {
-            TreeSearchResult::Found { stack, found_key } => {
+        let mut stack = match self.search(key).await? {
+            TreeSearchResult::Found { mut stack } => {
                 // If the value being inserted is the same than the one already present, avoid the
                 // useless write.
-                let branch = stack.top();
-                let old_value = branch.get_existing(&found_key);
+                let entry = stack
+                    .top_occupied_entry()
+                    .expect("entry should be occupied");
+                let old_value = entry.value();
 
                 if &value == old_value {
                     return Ok(Some(value));
@@ -188,13 +190,9 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 // tree node blob id), we don't actually `unstore` it here as it is not our
                 // responsibility. After all, we don't `store` the provided `value` either.
 
-                (Some(stack), found_key)
+                Some(stack)
             }
-            TreeSearchResult::Missing {
-                stack,
-                missing_key,
-                next_key,
-            } => {
+            TreeSearchResult::Missing { stack, next_key } => {
                 // Set the parameters for the stack update.
                 // There was no such key, so no previous value to return.
                 count_diff = 1;
@@ -219,18 +217,18 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 // associated key, which is not what we want. So we pop it here and deal with
                 // it as a special case so that the rest of the stack unwinding can expect the
                 // child to always be there.
-                let (stack, (next_key, mut branch)) = stack.pop();
+                let (stack, (mut branch, child_key)) = stack.pop();
                 branch.meta.local_key_size = branch
                     .meta
                     .local_key_size
                     .checked_add(new_size)
                     .expect("unexpected overflow");
                 branch.meta.total_count += count_diff;
-                branch.insert_non_existing(missing_key, value);
+                branch.insert_non_existing(child_key, value);
 
                 value = self.persist_branch(&branch).await?;
 
-                (stack, next_key)
+                stack
             }
         };
 
@@ -238,15 +236,13 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         // needs to be either inserted or updated with the value in `value`.
 
         while let Some(new_stack) = stack {
-            let (next_key, mut branch);
-            (stack, (next_key, branch)) = new_stack.pop();
-            let old_value = branch.replace_existing(child_key, value);
+            let (mut branch, child_key);
+            (stack, (branch, child_key)) = new_stack.pop();
+            let old_value = branch.replace_existing(&child_key, value);
 
             self.transaction.unstore(&old_value).await?;
             branch.meta.local_key_size = size_diff.apply_to(branch.meta.local_key_size);
             branch.meta.total_count += count_diff;
-
-            child_key = next_key;
 
             value = self.persist_branch(&branch).await?;
         }
@@ -265,44 +261,36 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         assert_eq!(key.len(), expected_key_size);
 
         let root = self.get_root().await?;
-        let stack = TreeSearchStack::new(root);
+        let (child_key, next_key) = Self::split_key(key, root.meta.local_key_size);
+        let stack = TreeSearchStack::new(root, child_key);
 
-        self.search_from(stack, key).await
+        self.search_from(stack, next_key).await
     }
 
     fn search_from(
         &self,
         mut stack: TreeSearchStack,
-        key: Bytes,
+        next_key: Option<Bytes>,
     ) -> BoxFuture<'_, Result<TreeSearchResult>> {
         Box::pin(async move {
-            let top = stack.top_mut();
-            let local_key_size = top.meta.local_key_size;
-
-            let (local_key, next_key) = Self::split_key(key, local_key_size);
-
-            match top.entry(local_key) {
-                TreeBranchEntry::Occupied(entry) => {
+            match stack.top_occupied_entry() {
+                Some(entry) => {
                     match next_key {
                         // If we have no next key, it means we found the value.
-                        None => {
-                            let found_key = entry.into_key_elem();
-
-                            Ok(TreeSearchResult::Found { stack, found_key })
-                        }
+                        None => Ok(TreeSearchResult::Found { stack }),
                         Some(next_key) => {
-                            // We can remove the values from the local node to avoid clones as we we
-                            // will fetch the new parent node anyway.
-                            let (local_key, id) = entry.remove();
-                            let node = self.fetch_branch(&id).await?;
+                            let id = entry.value();
+                            let branch = self.fetch_branch(id).await?;
 
-                            stack.push(local_key, node);
+                            let (child_key, next_key) =
+                                Self::split_key(next_key, branch.meta.local_key_size);
+                            stack.push(branch, child_key);
 
                             self.search_from(stack, next_key).await
                         }
                     }
                 }
-                TreeBranchEntry::Vacant(entry) => {
+                None => {
                     // If there is a next key, assume it won't be split and will be used entirely
                     // as a binary tree path element.
                     let next_key = next_key
@@ -310,13 +298,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                         .transpose()
                         .expect("next_key should be constructible from bytes");
 
-                    let missing_key = entry.into_key_elem();
-
-                    Ok(super::TreeSearchResult::Missing {
-                        stack,
-                        missing_key,
-                        next_key,
-                    })
+                    Ok(super::TreeSearchResult::Missing { stack, next_key })
                 }
             }
         })
