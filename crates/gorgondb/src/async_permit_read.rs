@@ -48,7 +48,7 @@ impl<Inner: AsyncRead + Unpin> AsyncRead for AsyncPermitRead<Inner> {
             match self.as_mut().project() {
                 AsyncPermitReadImpl::Reading { name, inner, .. } => {
                     match inner.poll_read(cx, buf) {
-                        Poll::Ready(Ok(size)) if size == 0 => {
+                        Poll::Ready(Ok(0)) => {
                             tracing::debug!(
                                 "Async reader `{name}` is now done reading: returning permit."
                             );

@@ -1,6 +1,6 @@
 //! Tree-type structure for indexes.
 
-use std::fmt::Display;
+use std::{fmt::Display, num::NonZeroU64};
 
 use bytes::Bytes;
 use itertools::Itertools;
@@ -10,28 +10,28 @@ use crate::BlobId;
 
 /// A tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Tree<Meta> {
+pub enum Tree<KeyElem, Meta> {
     /// A branch.
-    Branch(TreeBranch<Meta>),
+    Branch(TreeBranch<KeyElem, Meta>),
 
     /// A leaf.
     Leaf(BlobId),
 }
 
-impl<Meta: Default> Default for Tree<Meta> {
+impl<KeyElem, Meta: Default> Default for Tree<KeyElem, Meta> {
     fn default() -> Self {
         Self::Branch(TreeBranch::default())
     }
 }
 
-impl<Meta: DeserializeOwned> Tree<Meta> {
+impl<KeyElem: DeserializeOwned, Meta: DeserializeOwned> Tree<KeyElem, Meta> {
     /// Deserialize the tree from a slice of bytes.
     pub fn from_slice(input: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
         rmp_serde::from_slice(input)
     }
 }
 
-impl<Meta: Serialize> Tree<Meta> {
+impl<KeyElem: Serialize, Meta: Serialize> Tree<KeyElem, Meta> {
     /// Serialize the tree as a vector of bytes.
     pub fn to_vec(&self) -> Vec<u8> {
         rmp_serde::to_vec(self).expect("serialization should never fail")
@@ -39,33 +39,58 @@ impl<Meta: Serialize> Tree<Meta> {
 }
 
 /// A tree branch.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TreeBranch<Meta> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeBranch<KeyElem, Meta> {
     pub(crate) meta: Meta,
 
-    children: Vec<TreeItem>,
+    children: Vec<TreeItem<KeyElem>>,
 }
 
-impl<Meta: DeserializeOwned> TreeBranch<Meta> {
+impl<KeyElem, Meta: Default> Default for TreeBranch<KeyElem, Meta> {
+    fn default() -> Self {
+        Self {
+            meta: Default::default(),
+            children: Default::default(),
+        }
+    }
+}
+
+impl<KeyElem: DeserializeOwned, Meta: DeserializeOwned> TreeBranch<KeyElem, Meta> {
     /// Deserialize the tree from a slice of bytes.
     pub fn from_slice(input: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
         rmp_serde::from_slice(input)
     }
 }
 
-impl<Meta: Serialize> TreeBranch<Meta> {
+impl<KeyElem: Serialize, Meta: Serialize> TreeBranch<KeyElem, Meta> {
     /// Serialize the tree as a vector of bytes.
     pub fn to_vec(&self) -> Vec<u8> {
         rmp_serde::to_vec(self).expect("serialization should never fail")
     }
 }
 
-impl<Meta> TreeBranch<Meta> {
+impl<KeyElem: Ord, Meta> TreeBranch<KeyElem, Meta> {
+    /// Create a new tree branch with no children.
+    pub fn new(meta: Meta) -> Self {
+        Self {
+            meta,
+            children: Default::default(),
+        }
+    }
+
+    /// Create a new tree branch with a single child.
+    pub fn new_with_single_child(meta: Meta, key: KeyElem, id: BlobId) -> Self {
+        Self {
+            meta,
+            children: vec![TreeItem(key, id)],
+        }
+    }
+
     /// Find the children with the specified key.
     ///
     /// If the children is not found, an error is returned containing the index at which it should
     /// have been found.
-    pub fn entry(&'_ mut self, key: Bytes) -> TreeBranchEntry<'_, Meta> {
+    pub fn entry(&mut self, key: KeyElem) -> TreeBranchEntry<'_, KeyElem, Meta> {
         match self.children.binary_search_by(|item| item.0.cmp(&key)) {
             Ok(idx) => TreeBranchEntry::Occupied(TreeBranchOccupiedEntry {
                 branch: self,
@@ -79,32 +104,58 @@ impl<Meta> TreeBranch<Meta> {
             }),
         }
     }
+
+    /// Get a child value that is is guaranteed to be present.
+    pub fn get_existing(&self, key: &KeyElem) -> &BlobId {
+        match self.children.binary_search_by(|item| item.0.cmp(key)) {
+            Ok(idx) => &self.children[idx].1,
+            Err(_) => unreachable!("key should exist"),
+        }
+    }
+
+    /// Replace a child into the branch, that is guaranteed to already be present.
+    ///
+    /// Returns the previous value.
+    pub fn replace_existing(&mut self, key: KeyElem, id: BlobId) -> BlobId {
+        match self.entry(key) {
+            TreeBranchEntry::Occupied(mut entry) => entry.replace(id),
+            TreeBranchEntry::Vacant(_) => unreachable!("key should exist"),
+        }
+    }
+
+    /// Insert a child into the branch, that is guaranteed to not exist yet.
+    pub fn insert_non_existing(&mut self, key: KeyElem, id: BlobId) {
+        match self.entry(key) {
+            TreeBranchEntry::Occupied(_) => unreachable!("key should not exist"),
+            TreeBranchEntry::Vacant(entry) => entry.insert(id),
+        };
+    }
 }
 
 #[derive(Debug)]
-pub enum TreeBranchEntry<'b, Meta> {
+pub enum TreeBranchEntry<'b, KeyElem, Meta> {
     /// The result was found.
-    Occupied(TreeBranchOccupiedEntry<'b, Meta>),
+    Occupied(TreeBranchOccupiedEntry<'b, KeyElem, Meta>),
 
     /// The result was not found.
-    Vacant(TreeBranchVacantEntry<'b, Meta>),
+    Vacant(TreeBranchVacantEntry<'b, KeyElem, Meta>),
 }
 
 #[derive(Debug)]
-pub struct TreeBranchOccupiedEntry<'b, Meta> {
-    branch: &'b mut TreeBranch<Meta>,
+pub struct TreeBranchOccupiedEntry<'b, KeyElem, Meta> {
+    branch: &'b mut TreeBranch<KeyElem, Meta>,
     idx: usize,
-    key: Bytes,
+    key: KeyElem,
 }
 
-impl<'b, Meta> TreeBranchOccupiedEntry<'b, Meta> {
-    /// Transform the entry into its key.
-    pub fn into_key(self) -> Bytes {
+impl<'b, KeyElem, Meta> TreeBranchOccupiedEntry<'b, KeyElem, Meta> {
+    /// Get the key associated to the entry.
+    pub fn into_key_elem(self) -> KeyElem {
         self.key
     }
 
     /// Get the value associated to the entry.
-    pub fn get(&self) -> &BlobId {
+    pub fn value(&self) -> &BlobId {
         &self
             .branch
             .children
@@ -113,8 +164,8 @@ impl<'b, Meta> TreeBranchOccupiedEntry<'b, Meta> {
             .1
     }
 
-    /// Insert a new value in the occupied entry, returning the previous one.
-    pub fn insert(self, mut id: BlobId) -> BlobId {
+    /// Replace the value in the occupied entry, returning the previous one.
+    pub fn replace(&mut self, mut id: BlobId) -> BlobId {
         let new_id = &mut self
             .branch
             .children
@@ -127,8 +178,8 @@ impl<'b, Meta> TreeBranchOccupiedEntry<'b, Meta> {
         id
     }
 
-    /// Remove the value.
-    pub fn remove(self) -> (Bytes, BlobId) {
+    /// Remove the value in the occupied entry, returning it as well as the original node.
+    pub fn remove(self) -> (KeyElem, BlobId) {
         let TreeItem(key, id) = self.branch.children.remove(self.idx);
 
         (key, id)
@@ -136,15 +187,15 @@ impl<'b, Meta> TreeBranchOccupiedEntry<'b, Meta> {
 }
 
 #[derive(Debug)]
-pub struct TreeBranchVacantEntry<'b, Meta> {
-    branch: &'b mut TreeBranch<Meta>,
+pub struct TreeBranchVacantEntry<'b, KeyElem, Meta> {
+    branch: &'b mut TreeBranch<KeyElem, Meta>,
     idx: usize,
-    key: Bytes,
+    key: KeyElem,
 }
 
-impl<'b, Meta> TreeBranchVacantEntry<'b, Meta> {
+impl<'b, KeyElem, Meta> TreeBranchVacantEntry<'b, KeyElem, Meta> {
     /// Turn the entry into its contained key.
-    pub fn into_key(self) -> Bytes {
+    pub fn into_key_elem(self) -> KeyElem {
         self.key
     }
 
@@ -152,35 +203,13 @@ impl<'b, Meta> TreeBranchVacantEntry<'b, Meta> {
     pub fn insert(self, id: BlobId) {
         self.branch
             .children
-            .insert(self.idx, TreeItem(self.key, id))
+            .insert(self.idx, TreeItem(self.key, id));
     }
 }
 
 /// A tree item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TreeItem(#[serde(with = "serde_tree_item_key")] Bytes, BlobId);
-
-mod serde_tree_item_key {
-    use bytes::Bytes;
-    use serde::{Deserializer, Serialize, Serializer};
-    use serde_bytes::Deserialize;
-
-    pub fn serialize<S>(value: &Bytes, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serde_bytes::Bytes::new(value).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let b = serde_bytes::ByteBuf::deserialize(deserializer)?;
-
-        Ok(b.to_vec().into())
-    }
-}
+struct TreeItem<KeyElem>(KeyElem, BlobId);
 
 /// A path in a tree.
 #[derive(Debug, Clone)]
@@ -195,33 +224,69 @@ impl<T> Default for TreePath<T> {
 /// An alias for a binary tree path.
 pub type BinaryTreePath = TreePath<BinaryTreePathElement>;
 
-impl<Elem: Display> Display for TreePath<Elem> {
+impl<KeyElem: Display> Display for TreePath<KeyElem> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{}",
-            std::iter::once("$".to_string())
+            std::iter::once("#".to_string())
                 .chain(self.0.iter().map(|elem| elem.to_string()))
                 .join(".")
         )
     }
 }
 
-impl<Elem> TreePath<Elem> {
+impl<KeyElem> TreePath<KeyElem> {
     /// Get the root path.
     pub fn root() -> Self {
         Self(Vec::default())
     }
 
     /// Push a new element to the path.
-    pub fn push(&mut self, path: impl Into<Elem>) {
+    pub fn push(&mut self, path: impl Into<KeyElem>) {
         self.0.push(path.into());
     }
 }
 
-/// A tree path element that has a binary value.
-#[derive(Debug, Clone)]
-pub struct BinaryTreePathElement(pub Bytes);
+#[derive(Debug, thiserror::Error)]
+pub enum TreePathElementError {
+    #[error("the path element cannot be empty")]
+    Empty,
+}
+
+/// A tree path element that has a binary value with a striclty positive size.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct BinaryTreePathElement(#[serde(with = "serde_binary_tree_path_elem")] pub Bytes);
+
+mod serde_binary_tree_path_elem {
+    use bytes::Bytes;
+    use serde::{de::Error, Deserializer, Serialize, Serializer};
+    use serde_bytes::Deserialize;
+
+    use super::TreePathElementError;
+
+    pub fn serialize<S>(value: &Bytes, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serde_bytes::Bytes::new(value).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let b = serde_bytes::ByteBuf::deserialize(deserializer)?;
+
+        let b: Bytes = b.to_vec().into();
+
+        if b.is_empty() {
+            Err(D::Error::custom(TreePathElementError::Empty))
+        } else {
+            Ok(b)
+        }
+    }
+}
 
 impl Display for BinaryTreePathElement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -229,9 +294,15 @@ impl Display for BinaryTreePathElement {
     }
 }
 
-impl From<Bytes> for BinaryTreePathElement {
-    fn from(value: Bytes) -> Self {
-        Self(value)
+impl TryFrom<Bytes> for BinaryTreePathElement {
+    type Error = TreePathElementError;
+
+    fn try_from(value: Bytes) -> Result<Self, Self::Error> {
+        if value.is_empty() {
+            Err(TreePathElementError::Empty)
+        } else {
+            Ok(Self(value))
+        }
     }
 }
 
@@ -241,31 +312,93 @@ impl From<BinaryTreePathElement> for Bytes {
     }
 }
 
+impl BinaryTreePathElement {
+    /// Get the size of the binary tree path element.
+    pub fn size(&self) -> NonZeroU64 {
+        NonZeroU64::new(
+            self.0
+                .len()
+                .try_into()
+                .expect("could not convert usize to u64"),
+        )
+        .expect("binary tree path element should never be empty")
+    }
+}
+
+/// A search stack that is never empty.
+#[derive(Debug, Clone)]
+pub struct TreeSearchStack<KeyElem, Meta>(Vec<(KeyElem, TreeBranch<KeyElem, Meta>)>);
+
+impl<KeyElem: Default, Meta> TreeSearchStack<KeyElem, Meta> {
+    /// Instantiate a new stack starting from the specified node.
+    pub fn new(root: TreeBranch<KeyElem, Meta>) -> Self {
+        Self(vec![(Default::default(), root)])
+    }
+}
+
+impl<KeyElem, Meta> TreeSearchStack<KeyElem, Meta> {
+    /// Push a new item to the stack.
+    pub fn push(&mut self, elem: impl Into<KeyElem>, node: TreeBranch<KeyElem, Meta>) -> &mut Self {
+        self.0.push((elem.into(), node));
+
+        self
+    }
+
+    /// Pop an item from the stack.
+    ///
+    /// If the last element is popped, the stack is not returned.
+    pub fn pop(mut self) -> (Option<Self>, (KeyElem, TreeBranch<KeyElem, Meta>)) {
+        let value = self.0.pop().expect("stack cannot be empty");
+
+        if self.0.is_empty() {
+            (None, value)
+        } else {
+            (Some(self), value)
+        }
+    }
+
+    /// Get the top element in the stack.
+    pub fn top(&self) -> &TreeBranch<KeyElem, Meta> {
+        &self.0.last().expect("stack cannot be empty").1
+    }
+
+    /// Get the top element in the stack.
+    pub fn top_mut(&mut self) -> &mut TreeBranch<KeyElem, Meta> {
+        &mut self.0.last_mut().expect("stack cannot be empty").1
+    }
+
+    /// Convert the stack into a path.
+    pub fn into_path(self) -> TreePath<KeyElem> {
+        TreePath(self.0.into_iter().map(|(k, _)| k).collect())
+    }
+}
+
+impl<KeyElem: Clone, Meta> TreeSearchStack<KeyElem, Meta> {
+    /// Convert the stack into a path.
+    pub fn as_path(&self) -> TreePath<KeyElem> {
+        TreePath(self.0.iter().map(|(k, _)| k).cloned().collect())
+    }
+}
+
 /// A tree search result.
 #[derive(Debug)]
-pub enum TreeSearchResult<Elem, Meta> {
+pub enum TreeSearchResult<KeyElem, Meta> {
     /// The value was found in the tree, at the specified path.
     Found {
-        /// The path of the found entry.
-        path: TreePath<Elem>,
+        /// The stack that led to the found entry.
+        stack: TreeSearchStack<KeyElem, Meta>,
 
-        /// The last parent.
-        parent: TreeBranch<Meta>,
-
-        /// The blob ID of the found entry.
-        id: BlobId,
+        /// The entry that was found on the top node.
+        found_key: KeyElem,
     },
     Missing {
-        /// The path of the last existing parent.
-        parent_path: TreePath<Elem>,
+        /// The stack that led to the found entry.
+        stack: TreeSearchStack<KeyElem, Meta>,
 
-        /// The last parent.
-        parent: TreeBranch<Meta>,
+        /// The entry that was missing on the top node.
+        missing_key: KeyElem,
 
-        /// The local key that was missing.
-        local_key: Elem,
-
-        /// The next key.
-        next_key: Elem,
+        /// The next key, if there is one.
+        next_key: Option<KeyElem>,
     },
 }
