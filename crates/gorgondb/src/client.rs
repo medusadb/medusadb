@@ -15,12 +15,17 @@ pub struct Client {
 }
 
 impl Client {
-    /// Instantiate a new `Gorgon` using the specified storage.
+    /// Instantiate a new `Client` using the specified storage.
     pub fn new(storage: impl Into<Storage>) -> Self {
         let gorgon = Gorgon::default();
         let storage = Arc::new(storage.into());
 
         Self { gorgon, storage }
+    }
+
+    /// Instantiate a new `Client` for tests.
+    pub fn new_for_tests() -> Self {
+        Self::new(Storage::new_for_tests())
     }
 
     /// Retrieve a value from a file on disk.

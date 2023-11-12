@@ -60,3 +60,4 @@ tracing-subscriber = { workspace = true, optional = true}
 
 [dev-dependencies]
 serde_json.workspace = true
+tracing-test.workspace = true

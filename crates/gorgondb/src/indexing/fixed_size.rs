@@ -27,46 +27,46 @@ pub trait FixedSizeKey: Sized + Ord + Eq {
     }
 
     /// Convert the value into a slice of bytes.
-    fn into_bytes(self) -> Bytes;
+    fn to_bytes(&self) -> Bytes;
 }
 
 impl FixedSizeKey for u8 {
-    fn into_bytes(self) -> Bytes {
-        vec![self].into()
+    fn to_bytes(&self) -> Bytes {
+        vec![*self].into()
     }
 }
 
 impl FixedSizeKey for u16 {
-    fn into_bytes(self) -> Bytes {
+    fn to_bytes(&self) -> Bytes {
         let mut buf = Self::make_buf();
-        byteorder::NetworkEndian::write_u16(&mut buf, self);
+        byteorder::NetworkEndian::write_u16(&mut buf, *self);
 
         buf.into()
     }
 }
 
 impl FixedSizeKey for u32 {
-    fn into_bytes(self) -> Bytes {
+    fn to_bytes(&self) -> Bytes {
         let mut buf = Self::make_buf();
-        byteorder::NetworkEndian::write_u32(&mut buf, self);
+        byteorder::NetworkEndian::write_u32(&mut buf, *self);
 
         buf.into()
     }
 }
 
 impl FixedSizeKey for u64 {
-    fn into_bytes(self) -> Bytes {
+    fn to_bytes(&self) -> Bytes {
         let mut buf = Self::make_buf();
-        byteorder::NetworkEndian::write_u64(&mut buf, self);
+        byteorder::NetworkEndian::write_u64(&mut buf, *self);
 
         buf.into()
     }
 }
 
 impl FixedSizeKey for u128 {
-    fn into_bytes(self) -> Bytes {
+    fn to_bytes(&self) -> Bytes {
         let mut buf = Self::make_buf();
-        byteorder::NetworkEndian::write_u128(&mut buf, self);
+        byteorder::NetworkEndian::write_u128(&mut buf, *self);
 
         buf.into()
     }
@@ -111,24 +111,6 @@ type TreeBranch = super::TreeBranch<BinaryTreePathElement, TreeMeta>;
 type TreeSearchStack = super::TreeSearchStack<BinaryTreePathElement, TreeMeta>;
 type TreeSearchResult = super::TreeSearchResult<BinaryTreePathElement, TreeMeta>;
 
-#[derive(Debug, Clone, Copy)]
-enum SizeUpdate {
-    Increment(u64),
-    Decrement(u64),
-}
-
-impl SizeUpdate {
-    fn apply_to(self, value: NonZeroU64) -> NonZeroU64 {
-        match self {
-            SizeUpdate::Increment(i) => value.checked_add(i).expect("invalid size update"),
-            SizeUpdate::Decrement(i) => {
-                NonZeroU64::new(value.get().checked_sub(i).expect("overflow"))
-                    .expect("invalid size update")
-            }
-        }
-    }
-}
-
 impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
     /// Instantiate a new, empty, index.
     pub async fn initialize(transaction: &'t Transaction) -> Result<FixedSizeIndex<'t, Key>> {
@@ -137,11 +119,10 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             total_count: 0,
             total_size: 0,
             local_key_size: Key::KEY_SIZE,
-        })
-        .to_vec();
+        });
 
         let root = transaction
-            .store(root_data, &StoreOptions::default())
+            .store(root_data.to_vec(), &StoreOptions::default())
             .await?;
 
         Ok(Self {
@@ -151,22 +132,36 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         })
     }
 
+    /// Get a value from the index.
+    pub async fn get(&self, key: &Key) -> Result<Option<BlobId>> {
+        Ok(match self.search(key).await? {
+            TreeSearchResult::Found { mut stack } => Some(
+                stack
+                    .top_occupied_entry_mut()
+                    .expect("entry should be occupied")
+                    .value()
+                    .clone(),
+            ),
+            TreeSearchResult::Missing { .. } => None,
+        })
+    }
+
     /// Insert a value in the index.
     ///
     /// If a previous value already existed, it is replaced and returned.
-    pub async fn insert(&mut self, key: Key, mut value: BlobId) -> Result<Option<BlobId>> {
+    pub async fn insert(&mut self, key: &Key, mut value: BlobId) -> Result<Option<BlobId>> {
         let new_size = value.size();
 
         let result;
         let count_diff: u64;
-        let size_diff: SizeUpdate;
+        let size_diff: u64;
 
         let mut stack = match self.search(key).await? {
             TreeSearchResult::Found { mut stack } => {
                 // If the value being inserted is the same than the one already present, avoid the
                 // useless write.
                 let entry = stack
-                    .top_occupied_entry()
+                    .top_occupied_entry_mut()
                     .expect("entry should be occupied");
                 let old_value = entry.value();
 
@@ -176,13 +171,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
                 // Set the parameters for the stack update.
                 count_diff = 0;
-                let old_size = old_value.size();
-
-                if new_size > old_size {
-                    size_diff = SizeUpdate::Increment(new_size - old_size);
-                } else {
-                    size_diff = SizeUpdate::Decrement(new_size - old_size);
-                }
+                size_diff = new_size - old_value.size();
 
                 result = Some(old_value.clone());
 
@@ -196,7 +185,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 // Set the parameters for the stack update.
                 // There was no such key, so no previous value to return.
                 count_diff = 1;
-                size_diff = SizeUpdate::Increment(new_size);
+                size_diff = new_size;
                 result = None;
 
                 // There is some more key material to create under the missing key:
@@ -218,11 +207,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 // it as a special case so that the rest of the stack unwinding can expect the
                 // child to always be there.
                 let (stack, (mut branch, child_key)) = stack.pop();
-                branch.meta.local_key_size = branch
-                    .meta
-                    .local_key_size
-                    .checked_add(new_size)
-                    .expect("unexpected overflow");
+                branch.meta.total_size += new_size;
                 branch.meta.total_count += count_diff;
                 branch.insert_non_existing(child_key, value);
 
@@ -241,7 +226,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             let old_value = branch.replace_existing(&child_key, value);
 
             self.transaction.unstore(&old_value).await?;
-            branch.meta.local_key_size = size_diff.apply_to(branch.meta.local_key_size);
+            branch.meta.total_size += size_diff;
             branch.meta.total_count += count_diff;
 
             value = self.persist_branch(&branch).await?;
@@ -251,8 +236,8 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         Ok(result)
     }
 
-    async fn search(&self, key: Key) -> Result<TreeSearchResult> {
-        let key = key.into_bytes();
+    async fn search(&self, key: &Key) -> Result<TreeSearchResult> {
+        let key = key.to_bytes();
 
         let expected_key_size: usize = Key::KEY_SIZE
             .get()
@@ -261,6 +246,18 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         assert_eq!(key.len(), expected_key_size);
 
         let root = self.get_root().await?;
+
+        if root.meta.local_key_size > Key::KEY_SIZE {
+            return Err(Error::CorruptedTree {
+                path: BinaryTreePath::default(),
+                err: format!(
+                    "root branch has an invalid local key size of {} when at most {} was expected",
+                    root.meta.local_key_size,
+                    Key::KEY_SIZE
+                ),
+            });
+        }
+
         let (child_key, next_key) = Self::split_key(key, root.meta.local_key_size);
         let stack = TreeSearchStack::new(root, child_key);
 
@@ -273,7 +270,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         next_key: Option<Bytes>,
     ) -> BoxFuture<'_, Result<TreeSearchResult>> {
         Box::pin(async move {
-            match stack.top_occupied_entry() {
+            match stack.top_occupied_entry_mut() {
                 Some(entry) => {
                     match next_key {
                         // If we have no next key, it means we found the value.
@@ -346,5 +343,89 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 Some(next_key)
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Client;
+    use tracing_test::traced_test;
+
+    use super::*;
+
+    macro_rules! blob_id {
+        ($data:literal) => {
+            BlobId::self_contained($data.as_bytes()).unwrap()
+        };
+    }
+
+    macro_rules! assert_key_missing {
+        ($index:ident, $key:expr) => {
+            tracing::debug!("assert_key_missing({})", $key);
+
+            assert!($index.get(&$key).await.unwrap().is_none());
+        };
+    }
+
+    macro_rules! assert_key_exists {
+        ($index:ident, $key:expr, $data:literal) => {
+            tracing::debug!("assert_key_exists({}, {:?})", $key, $data);
+
+            assert_eq!($index.get(&$key).await.unwrap(), Some(blob_id!($data)));
+        };
+    }
+
+    macro_rules! assert_insert_new {
+        ($index:ident, $key:expr, $data:literal) => {
+            tracing::debug!("assert_insert_new({}, {:?})", $key, $data);
+
+            let blob_id = blob_id!($data);
+            assert_eq!($index.insert(&$key, blob_id).await.unwrap(), None);
+        };
+    }
+
+    macro_rules! assert_insert_update {
+        ($index:ident, $key:expr, $data:literal, $old_data:literal) => {
+            tracing::debug!(
+                "assert_insert_update({}, {:?}, {:?})",
+                $key,
+                $data,
+                $old_data
+            );
+
+            let blob_id = blob_id!($data);
+            let old_blob_id = blob_id!($old_data);
+            assert_eq!(
+                $index.insert(&$key, blob_id).await.unwrap(),
+                Some(old_blob_id)
+            );
+        };
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_fixed_size_index() {
+        let client = Client::new_for_tests();
+        let tx = client.start_transaction().unwrap();
+        let mut index = FixedSizeIndex::<'_, u16>::initialize(&tx).await.unwrap();
+
+        assert_key_missing!(index, 1);
+        assert_key_missing!(index, 2);
+        assert_key_missing!(index, 3);
+
+        assert_insert_new!(index, 1, "one");
+        assert_key_exists!(index, 1, "one");
+        assert_key_missing!(index, 2);
+        assert_key_missing!(index, 3);
+
+        assert_insert_new!(index, 2, "two");
+        assert_key_exists!(index, 1, "one");
+        assert_key_exists!(index, 2, "two");
+        assert_key_missing!(index, 3);
+
+        assert_insert_update!(index, 2, "dos", "two");
+        assert_key_exists!(index, 1, "one");
+        assert_key_exists!(index, 2, "dos");
+        assert_key_missing!(index, 3);
     }
 }

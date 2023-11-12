@@ -359,7 +359,7 @@ impl<KeyElem, Meta> TreeSearchStack<KeyElem, Meta> {
 
 impl<KeyElem: Ord, Meta> TreeSearchStack<KeyElem, Meta> {
     /// Get the top occupied entry.
-    pub fn top_occupied_entry(&mut self) -> Option<TreeBranchOccupiedEntry<'_, KeyElem, Meta>> {
+    pub fn top_occupied_entry_mut(&mut self) -> Option<TreeBranchOccupiedEntry<'_, KeyElem, Meta>> {
         let top = self.0.last_mut().expect("stack cannot be empty");
 
         top.0.occupied_entry(&top.1)

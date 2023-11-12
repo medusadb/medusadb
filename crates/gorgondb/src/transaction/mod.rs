@@ -134,7 +134,7 @@ impl Transaction {
 
 #[cfg(test)]
 mod tests {
-    use tracing_subscriber::filter::LevelFilter;
+    use tracing_test::traced_test;
 
     use crate::{Client, Filesystem};
 
@@ -145,13 +145,9 @@ mod tests {
     const TEST_BUFFER_C: &[u8] = &[0x0C; 1024];
     const TEST_BUFFER_D: &[u8] = &[0x0D; 1024];
 
+    #[traced_test]
     #[tokio::test]
     async fn test_transaction() {
-        tracing_subscriber::fmt()
-            .with_max_level(LevelFilter::DEBUG)
-            .with_writer(tracing_subscriber::fmt::writer::TestWriter::default())
-            .init();
-
         let filesystem = Filesystem::default();
         let tempdir = tempfile::tempdir().unwrap();
         let storage = filesystem.new_storage(tempdir.path()).unwrap();
