@@ -14,7 +14,7 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct Storage {
     disk_size_threshold: u64,
-    blobs: Arc<RwLock<HashMap<RemoteRef, RefCountedBlob>>>,
+    blobs: RwLock<HashMap<RemoteRef, RefCountedBlob>>,
     filesystem_storage: FilesystemStorage,
     _filesystem_root: TempDir, // Keep the folder alive.
     base_storage: Arc<crate::Storage>,
@@ -31,7 +31,7 @@ impl Storage {
 
         Ok(Self {
             disk_size_threshold,
-            blobs: Arc::default(),
+            blobs: Default::default(),
             filesystem_storage,
             _filesystem_root,
             base_storage,
@@ -39,9 +39,7 @@ impl Storage {
     }
 
     pub(crate) async fn commit(self) -> crate::storage::Result<(), (Self, crate::storage::Error)> {
-        let blobs = Arc::into_inner(self.blobs)
-            .expect("there should be only one active reference to this transaction storage")
-            .into_inner();
+        let blobs = self.blobs.into_inner();
         let mut blobs_iter = blobs.into_iter();
 
         while let Some((remote_ref, ref_counted_blob)) = blobs_iter.next() {
@@ -58,7 +56,7 @@ impl Storage {
                 // Make sure we add back to to blobs the non-handled ones.
                 return Err((Self{
                     disk_size_threshold: self.disk_size_threshold,
-                    blobs: Arc::new(RwLock::new(std::iter::once((remote_ref, ref_counted_blob)).chain(blobs_iter).collect())),
+                    blobs: RwLock::new(std::iter::once((remote_ref, ref_counted_blob)).chain(blobs_iter).collect()),
                     filesystem_storage: self.filesystem_storage,
                     _filesystem_root: self._filesystem_root,
                     base_storage: self.base_storage,
