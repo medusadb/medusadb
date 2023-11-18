@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{gorgon::StoreOptions, BlobId, Transaction};
 
-use super::{BinaryTreePath, BinaryTreePathElement};
+use super::{BinaryTreePath, BinaryTreePathElement, Error};
 
 /// A trait for types that can be used as a fixed-size key.
 pub trait FixedSizeKey: Sized + Ord + Eq {
@@ -72,30 +72,12 @@ impl FixedSizeKey for u128 {
     }
 }
 
-/// A distributed map that stores key with a fixed-size.
-#[derive(Debug)]
-pub struct FixedSizeIndex<'t, Key> {
-    _phantom: PhantomData<Key>,
-    root: BlobId,
-    transaction: &'t Transaction,
-}
+type Result<T> = std::result::Result<T, Error<BinaryTreePathElement>>;
+type TreeBranch = super::TreeBranch<BinaryTreePathElement, TreeMeta>;
+type TreeSearchStack = super::TreeSearchStack<BinaryTreePathElement, TreeMeta>;
+type TreeSearchResult = super::TreeSearchResult<BinaryTreePathElement, TreeMeta>;
 
-/// An error type.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// An error happened at the transaction level.
-    #[error("transaction: {0}")]
-    TransactionError(#[from] crate::gorgon::Error),
-
-    /// The tree is corrupted.
-    #[error("tree is corrupted at `{path}`: {err}")]
-    CorruptedTree { path: BinaryTreePath, err: String },
-}
-
-/// A convenience result type.
-pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TreeMeta {
     /// The total count of leaf nodes under this node, both directly and indirectly.
     total_count: u64,
@@ -107,29 +89,72 @@ struct TreeMeta {
     local_key_size: NonZeroU64,
 }
 
-type TreeBranch = super::TreeBranch<BinaryTreePathElement, TreeMeta>;
-type TreeSearchStack = super::TreeSearchStack<BinaryTreePathElement, TreeMeta>;
-type TreeSearchResult = super::TreeSearchResult<BinaryTreePathElement, TreeMeta>;
+/// A distributed map that stores key with a fixed-size.
+#[derive(Debug)]
+pub struct FixedSizeIndex<'t, Key> {
+    _phantom: PhantomData<Key>,
+    root_id: BlobId,
+    root: TreeBranch,
+    transaction: &'t Transaction,
+}
 
 impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
     /// Instantiate a new, empty, index.
-    pub async fn initialize(transaction: &'t Transaction) -> Result<FixedSizeIndex<'t, Key>> {
+    pub async fn initialize(transaction: &'t Transaction) -> Result<Self> {
         // A new tree has no children and a local key size of exactly the full key size,=.
-        let root_data = TreeBranch::new(TreeMeta {
+        let root = TreeBranch::new(TreeMeta {
             total_count: 0,
             total_size: 0,
             local_key_size: Key::KEY_SIZE,
         });
 
-        let root = transaction
-            .store(root_data.to_vec(), &StoreOptions::default())
+        let root_id = transaction
+            .store(root.to_vec(), &StoreOptions::default())
             .await?;
 
         Ok(Self {
             _phantom: Default::default(),
             root,
+            root_id,
             transaction,
         })
+    }
+
+    /// Load an index from its root id.
+    pub async fn load(transaction: &'t Transaction, root_id: BlobId) -> Result<Self> {
+        let root = Self::fetch_branch_tx(transaction, &root_id).await?;
+
+        if root.meta.local_key_size > Key::KEY_SIZE {
+            return Err(Error::CorruptedTree {
+                path: BinaryTreePath::default(),
+                err: format!(
+                    "root branch has an invalid local key size of {} when at most {} was expected",
+                    root.meta.local_key_size,
+                    Key::KEY_SIZE
+                ),
+            });
+        }
+
+        Ok(Self {
+            _phantom: Default::default(),
+            root,
+            root_id,
+            transaction,
+        })
+    }
+
+    /// Get the root id for the index.
+    ///
+    /// This is typically used to persist the tree itself.
+    pub fn root_id(&self) -> &BlobId {
+        &self.root_id
+    }
+
+    /// Turn the index into its root blob id.
+    ///
+    /// This is typically used to persist the tree itself.
+    pub fn into_root_id(self) -> BlobId {
+        self.root_id
     }
 
     /// Get a value from the index.
@@ -156,13 +181,11 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         let count_diff: u64;
         let size_diff: u64;
 
-        let mut stack = match self.search(key).await? {
-            TreeSearchResult::Found { mut stack } => {
-                // If the value being inserted is the same than the one already present, avoid the
-                // useless write.
-                let entry = stack
-                    .top_occupied_entry_mut()
-                    .expect("entry should be occupied");
+        let (stack, mut new_root) = match self.search(key).await? {
+            TreeSearchResult::Found { stack } => {
+                let (stack, (mut branch, child_key)) = stack.pop_non_empty()?;
+
+                let mut entry = branch.occupied_entry(&child_key);
                 let old_value = entry.value();
 
                 if &value == old_value {
@@ -175,11 +198,16 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
                 result = Some(old_value.clone());
 
+                entry.replace(value);
+                branch.meta.total_size += size_diff;
+                branch.meta.total_count += count_diff;
+                value = self.persist_branch(&branch).await?;
+
                 // Note: since the old value is pointing to an externally provided blob id (not a
                 // tree node blob id), we don't actually `unstore` it here as it is not our
                 // responsibility. After all, we don't `store` the provided `value` either.
 
-                Some(stack)
+                (stack, branch)
             }
             TreeSearchResult::Missing { stack, next_key } => {
                 // Set the parameters for the stack update.
@@ -206,23 +234,22 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 // associated key, which is not what we want. So we pop it here and deal with
                 // it as a special case so that the rest of the stack unwinding can expect the
                 // child to always be there.
-                let (stack, (mut branch, child_key)) = stack.pop();
+                let (stack, (mut branch, child_key)) = stack.pop_non_empty()?;
+
                 branch.meta.total_size += new_size;
                 branch.meta.total_count += count_diff;
                 branch.insert_non_existing(child_key, value);
 
                 value = self.persist_branch(&branch).await?;
 
-                stack
+                (stack, branch)
             }
         };
 
         // At this point, if we have stack, its top value has a child node at `child_key` that
         // needs to be either inserted or updated with the value in `value`.
 
-        while let Some(new_stack) = stack {
-            let (mut branch, child_key);
-            (stack, (branch, child_key)) = new_stack.pop();
+        for (mut branch, child_key) in stack {
             let old_value = branch.replace_existing(&child_key, value);
 
             self.transaction.unstore(&old_value).await?;
@@ -230,10 +257,73 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             branch.meta.total_count += count_diff;
 
             value = self.persist_branch(&branch).await?;
+            new_root = branch;
         }
 
-        self.root = value;
+        self.set_root(value, new_root);
+
         Ok(result)
+    }
+
+    /// Remove a value from the index.
+    ///
+    /// If the value existed, it is returned.
+    pub async fn remove(&mut self, key: &Key) -> Result<Option<BlobId>> {
+        Ok(match self.search(key).await? {
+            TreeSearchResult::Found { stack } => {
+                let (stack, (mut branch, child_key)) = stack.pop_non_empty()?;
+
+                let result = branch.occupied_entry(&child_key).remove();
+
+                branch.meta.total_size -= result.size();
+                branch.meta.total_count -= 1;
+
+                let mut value = self.persist_branch(&branch).await?;
+                let mut new_root = branch;
+
+                for (mut branch, child_key) in stack {
+                    let old_value = branch.replace_existing(&child_key, value);
+
+                    self.transaction.unstore(&old_value).await?;
+                    branch.meta.total_size -= result.size();
+                    branch.meta.total_count -= 1;
+
+                    value = self.persist_branch(&branch).await?;
+                    new_root = branch;
+                }
+
+                self.set_root(value, new_root);
+
+                Some(result)
+            }
+            TreeSearchResult::Missing { .. } => None,
+        })
+    }
+
+    /// Check if the index is empty.
+    pub fn is_empty(&self) -> bool {
+        self.root.meta.total_count == 0
+    }
+
+    /// Get the count of items in the index.
+    ///
+    /// This size does not consider intermediate branches, just leaf nodes.
+    pub fn len(&self) -> u64 {
+        self.root.meta.total_count
+    }
+
+    /// Get the total size of the items stored in the index.
+    ///
+    /// This size does not consider intermediate branches, just leaf nodes.
+    pub fn total_size(&self) -> u64 {
+        self.root.meta.total_size
+    }
+
+    fn set_root(&mut self, root_id: BlobId, root: TreeBranch) {
+        tracing::trace!("Updating root from {} to {root_id}.", self.root_id);
+
+        self.root_id = root_id;
+        self.root = root;
     }
 
     async fn search(&self, key: &Key) -> Result<TreeSearchResult> {
@@ -245,21 +335,8 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             .expect("key size should convert to usize");
         assert_eq!(key.len(), expected_key_size);
 
-        let root = self.get_root().await?;
-
-        if root.meta.local_key_size > Key::KEY_SIZE {
-            return Err(Error::CorruptedTree {
-                path: BinaryTreePath::default(),
-                err: format!(
-                    "root branch has an invalid local key size of {} when at most {} was expected",
-                    root.meta.local_key_size,
-                    Key::KEY_SIZE
-                ),
-            });
-        }
-
-        let (child_key, next_key) = Self::split_key(key, root.meta.local_key_size);
-        let stack = TreeSearchStack::new(root, child_key);
+        let (child_key, next_key) = Self::split_key(key, self.root.meta.local_key_size);
+        let stack = TreeSearchStack::new(self.root.clone(), child_key);
 
         self.search_from(stack, next_key).await
     }
@@ -301,17 +378,17 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         })
     }
 
-    async fn get_root(&self) -> Result<TreeBranch> {
-        self.fetch_branch(&self.root).await
-    }
-
-    async fn fetch_branch(&self, id: &BlobId) -> Result<TreeBranch> {
-        let data = self.transaction.retrieve_to_memory(id).await?;
+    async fn fetch_branch_tx(transaction: &Transaction, id: &BlobId) -> Result<TreeBranch> {
+        let data = transaction.retrieve_to_memory(id).await?;
 
         TreeBranch::from_slice(&data).map_err(|err| Error::CorruptedTree {
             path: BinaryTreePath::root(),
             err: err.to_string(),
         })
+    }
+
+    async fn fetch_branch(&self, id: &BlobId) -> Result<TreeBranch> {
+        Self::fetch_branch_tx(self.transaction, id).await
     }
 
     async fn persist_branch(&self, branch: &TreeBranch) -> Result<BlobId> {
@@ -359,6 +436,31 @@ mod tests {
         };
     }
 
+    macro_rules! assert_empty {
+        ($index:ident) => {
+            tracing::debug!("assert_empty()");
+
+            assert!($index.is_empty());
+            assert_eq!($index.len(), 0);
+        };
+    }
+
+    macro_rules! assert_len {
+        ($index:ident, $len:expr) => {
+            tracing::debug!("assert_len({})", $len);
+
+            assert_eq!($index.len(), $len);
+        };
+    }
+
+    macro_rules! assert_total_size {
+        ($index:ident, $total_size:expr) => {
+            tracing::debug!("assert_total_size({})", $total_size);
+
+            assert_eq!($index.total_size(), $total_size);
+        };
+    }
+
     macro_rules! assert_key_missing {
         ($index:ident, $key:expr) => {
             tracing::debug!("assert_key_missing({})", $key);
@@ -402,12 +504,34 @@ mod tests {
         };
     }
 
+    macro_rules! assert_remove_missing {
+        ($index:ident, $key:expr) => {
+            tracing::debug!("assert_remove_missing({})", $key);
+
+            assert!($index.remove(&$key).await.unwrap().is_none());
+        };
+    }
+
+    macro_rules! assert_remove_exists {
+        ($index:ident, $key:expr, $old_data:literal) => {
+            tracing::debug!("assert_remove_exists({}, {})", $key, $old_data);
+
+            let old_blob_id = blob_id!($old_data);
+            assert_eq!($index.remove(&$key).await.unwrap(), Some(old_blob_id));
+        };
+    }
+
     #[traced_test]
     #[tokio::test]
     async fn test_fixed_size_index() {
         let client = Client::new_for_tests();
         let tx = client.start_transaction().unwrap();
         let mut index = FixedSizeIndex::<'_, u16>::initialize(&tx).await.unwrap();
+
+        let initial_root_id = index.root_id().clone();
+
+        assert_empty!(index);
+        assert_total_size!(index, 0);
 
         assert_key_missing!(index, 1);
         assert_key_missing!(index, 2);
@@ -418,14 +542,64 @@ mod tests {
         assert_key_missing!(index, 2);
         assert_key_missing!(index, 3);
 
+        assert_len!(index, 1);
+        assert_total_size!(index, 3);
+
         assert_insert_new!(index, 2, "two");
         assert_key_exists!(index, 1, "one");
         assert_key_exists!(index, 2, "two");
         assert_key_missing!(index, 3);
 
-        assert_insert_update!(index, 2, "dos", "two");
+        assert_len!(index, 2);
+        assert_total_size!(index, 6);
+
+        assert_insert_update!(index, 2, "deux", "two");
         assert_key_exists!(index, 1, "one");
-        assert_key_exists!(index, 2, "dos");
+        assert_key_exists!(index, 2, "deux");
         assert_key_missing!(index, 3);
+
+        assert_len!(index, 2);
+        assert_total_size!(index, 7);
+
+        assert_insert_new!(index, 3, "three");
+        assert_key_exists!(index, 1, "one");
+        assert_key_exists!(index, 2, "deux");
+        assert_key_exists!(index, 3, "three");
+
+        assert_len!(index, 3);
+        assert_total_size!(index, 12);
+
+        assert_remove_exists!(index, 1, "one");
+        assert_key_missing!(index, 1);
+        assert_remove_missing!(index, 1);
+        assert_key_exists!(index, 2, "deux");
+        assert_key_exists!(index, 3, "three");
+
+        assert_len!(index, 2);
+        assert_total_size!(index, 9);
+
+        assert_remove_exists!(index, 2, "deux");
+        assert_key_missing!(index, 1);
+        assert_key_missing!(index, 2);
+        assert_remove_missing!(index, 1);
+        assert_remove_missing!(index, 2);
+        assert_key_exists!(index, 3, "three");
+
+        assert_len!(index, 1);
+        assert_total_size!(index, 5);
+
+        assert_remove_exists!(index, 3, "three");
+        assert_key_missing!(index, 1);
+        assert_key_missing!(index, 2);
+        assert_key_missing!(index, 3);
+        assert_remove_missing!(index, 1);
+        assert_remove_missing!(index, 2);
+        assert_remove_missing!(index, 3);
+
+        assert_empty!(index);
+        assert_total_size!(index, 0);
+
+        let final_root_id = index.root_id().clone();
+        assert_eq!(initial_root_id, final_root_id);
     }
 }

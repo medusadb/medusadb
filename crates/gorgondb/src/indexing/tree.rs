@@ -8,6 +8,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::BlobId;
 
+use super::Error;
+
 /// A tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Tree<KeyElem, Meta> {
@@ -99,7 +101,17 @@ impl<KeyElem: Ord, Meta> TreeBranch<KeyElem, Meta> {
     }
 
     /// Find the occupied entry for the children with the specified key.
-    pub fn occupied_entry(
+    pub fn occupied_entry(&mut self, key: &KeyElem) -> TreeBranchOccupiedEntry<'_, KeyElem, Meta> {
+        let idx = self
+            .children
+            .binary_search_by(|item| item.0.cmp(key))
+            .expect("the entry should exist");
+
+        TreeBranchOccupiedEntry { branch: self, idx }
+    }
+
+    /// Find the occupied entry for the children with the specified key.
+    fn as_occupied_entry(
         &mut self,
         key: &KeyElem,
     ) -> Option<TreeBranchOccupiedEntry<'_, KeyElem, Meta>> {
@@ -113,9 +125,7 @@ impl<KeyElem: Ord, Meta> TreeBranch<KeyElem, Meta> {
     ///
     /// Returns the previous value.
     pub fn replace_existing(&mut self, key: &KeyElem, id: BlobId) -> BlobId {
-        self.occupied_entry(key)
-            .expect("key should exist")
-            .replace(id)
+        self.occupied_entry(key).replace(id)
     }
 
     /// Insert a child into the branch, that is guaranteed to not exist yet.
@@ -165,6 +175,11 @@ impl<'b, KeyElem, Meta> TreeBranchOccupiedEntry<'b, KeyElem, Meta> {
         std::mem::swap(new_id, &mut id);
 
         id
+    }
+
+    /// Remove the value in the occupied entry, returning the it.
+    pub fn remove(&mut self) -> BlobId {
+        self.branch.children.remove(self.idx).1
     }
 }
 
@@ -302,9 +317,19 @@ impl BinaryTreePathElement {
     }
 }
 
-/// A search stack that is never empty.
+/// A search stack.
 #[derive(Debug, Clone)]
 pub struct TreeSearchStack<KeyElem, Meta>(Vec<(TreeBranch<KeyElem, Meta>, KeyElem)>);
+
+impl<KeyElem, Meta> Default for TreeSearchStack<KeyElem, Meta> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+/// A search stack result.
+pub type TreeSearchStackResult<T, KeyElem> = Result<T, Error<KeyElem>>;
+pub type TreeSearchStackItem<KeyElem, Meta> = (TreeBranch<KeyElem, Meta>, KeyElem);
 
 impl<KeyElem, Meta> TreeSearchStack<KeyElem, Meta> {
     /// Instantiate a new stack starting from the specified node.
@@ -324,31 +349,21 @@ impl<KeyElem, Meta> TreeSearchStack<KeyElem, Meta> {
     }
 
     /// Pop an item from the stack.
-    ///
-    /// If the last element is popped, the stack is not returned.
-    pub fn pop(mut self) -> (Option<Self>, (TreeBranch<KeyElem, Meta>, KeyElem)) {
-        let value = self.0.pop().expect("stack cannot be empty");
+    pub fn pop(&mut self) -> Option<TreeSearchStackItem<KeyElem, Meta>> {
+        self.0.pop()
+    }
 
-        if self.0.is_empty() {
-            (None, value)
-        } else {
-            (Some(self), value)
+    /// Pop an item from the stack, returning an error is the stack is empty.
+    pub fn pop_non_empty(
+        mut self,
+    ) -> TreeSearchStackResult<(Self, TreeSearchStackItem<KeyElem, Meta>), KeyElem> {
+        match self.pop() {
+            Some(v) => Ok((self, v)),
+            None => Err(super::Error::CorruptedTree {
+                path: self.into_path(),
+                err: "stack should not be empty at that point".to_owned(),
+            }),
         }
-    }
-
-    /// Get the top branch in the stack.
-    pub fn top_branch(&self) -> &TreeBranch<KeyElem, Meta> {
-        &self.0.last().expect("stack cannot be empty").0
-    }
-
-    /// Get the top branch in the stack.
-    pub fn top_branch_mut(&mut self) -> &mut TreeBranch<KeyElem, Meta> {
-        &mut self.0.last_mut().expect("stack cannot be empty").0
-    }
-
-    /// Get the top child key in the stack.
-    pub fn top_child_key(&self) -> &KeyElem {
-        &self.0.last().expect("stack cannot be empty").1
     }
 
     /// Convert the stack into a path.
@@ -357,12 +372,21 @@ impl<KeyElem, Meta> TreeSearchStack<KeyElem, Meta> {
     }
 }
 
+impl<KeyElem, Meta> Iterator for TreeSearchStack<KeyElem, Meta> {
+    type Item = TreeSearchStackItem<KeyElem, Meta>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.pop()
+    }
+}
+
 impl<KeyElem: Ord, Meta> TreeSearchStack<KeyElem, Meta> {
     /// Get the top occupied entry.
     pub fn top_occupied_entry_mut(&mut self) -> Option<TreeBranchOccupiedEntry<'_, KeyElem, Meta>> {
-        let top = self.0.last_mut().expect("stack cannot be empty");
-
-        top.0.occupied_entry(&top.1)
+        match self.0.last_mut() {
+            None => None,
+            Some(top) => top.0.as_occupied_entry(&top.1),
+        }
     }
 }
 
