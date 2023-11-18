@@ -436,7 +436,12 @@ mod tests {
     async fn test_fixed_size_index() {
         let client = Client::new_for_tests();
         let tx = client.start_transaction().unwrap();
+
+        assert_transaction_empty!(tx);
+
         let mut index = FixedSizeIndex::<'_, u16>::initialize(&tx).await.unwrap();
+
+        assert_transaction_empty!(tx);
 
         let initial_root_id = index.root_id().clone();
 
@@ -508,6 +513,8 @@ mod tests {
 
         assert_empty!(index);
         assert_total_size!(index, 0);
+
+        assert_transaction_empty!(tx);
 
         let final_root_id = index.root_id().clone();
         assert_eq!(initial_root_id, final_root_id);

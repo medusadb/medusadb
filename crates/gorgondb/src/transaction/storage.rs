@@ -14,7 +14,7 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct Storage {
     disk_size_threshold: u64,
-    blobs: RwLock<HashMap<RemoteRef, RefCountedBlob>>,
+    remote_refs: RwLock<HashMap<RemoteRef, RefCountedBlob>>,
     filesystem_storage: FilesystemStorage,
     _filesystem_root: TempDir, // Keep the folder alive.
     base_storage: Arc<crate::Storage>,
@@ -31,15 +31,20 @@ impl Storage {
 
         Ok(Self {
             disk_size_threshold,
-            blobs: Default::default(),
+            remote_refs: Default::default(),
             filesystem_storage,
             _filesystem_root,
             base_storage,
         })
     }
 
+    /// Get the reference remote refs.
+    pub(crate) async fn get_remote_refs(&self) -> Vec<RemoteRef> {
+        self.remote_refs.read().await.keys().cloned().collect()
+    }
+
     pub(crate) async fn commit(self) -> crate::storage::Result<(), (Self, crate::storage::Error)> {
-        let blobs = self.blobs.into_inner();
+        let blobs = self.remote_refs.into_inner();
         let mut blobs_iter = blobs.into_iter();
 
         while let Some((remote_ref, ref_counted_blob)) = blobs_iter.next() {
@@ -56,7 +61,7 @@ impl Storage {
                 // Make sure we add back to to blobs the non-handled ones.
                 return Err((Self{
                     disk_size_threshold: self.disk_size_threshold,
-                    blobs: RwLock::new(std::iter::once((remote_ref, ref_counted_blob)).chain(blobs_iter).collect()),
+                    remote_refs: RwLock::new(std::iter::once((remote_ref, ref_counted_blob)).chain(blobs_iter).collect()),
                     filesystem_storage: self.filesystem_storage,
                     _filesystem_root: self._filesystem_root,
                     base_storage: self.base_storage,
@@ -75,7 +80,7 @@ impl Store for Storage {
         remote_ref: &RemoteRef,
         source: crate::AsyncSource<'_>,
     ) -> crate::storage::Result<()> {
-        match self.blobs.write().await.entry(remote_ref.clone()) {
+        match self.remote_refs.write().await.entry(remote_ref.clone()) {
             std::collections::hash_map::Entry::Occupied(entry) => {
                 // The entry exists already: just increment the reference count.
                 entry.into_mut().count += 1;
@@ -103,7 +108,7 @@ impl Retrieve for Storage {
         &'s self,
         remote_ref: &RemoteRef,
     ) -> crate::storage::Result<Option<crate::AsyncSource<'s>>> {
-        let blobs = self.blobs.read().await;
+        let blobs = self.remote_refs.read().await;
 
         match blobs.get(remote_ref) {
             Some(ref_blob) => match &ref_blob.data {
@@ -130,7 +135,7 @@ impl Retrieve for Storage {
 impl Unstore for Storage {
     async fn unstore(&self, remote_ref: &RemoteRef) {
         if let std::collections::hash_map::Entry::Occupied(entry) =
-            self.blobs.write().await.entry(remote_ref.clone())
+            self.remote_refs.write().await.entry(remote_ref.clone())
         {
             // The entry exists already: if it has a single reference, we must delete it
             // entirely.

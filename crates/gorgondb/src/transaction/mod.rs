@@ -40,6 +40,15 @@ impl Transaction {
         Ok(Self { gorgon, storage })
     }
 
+    /// Get the blobs referenced by this transaction.
+    pub async fn get_blobs(&self) -> impl Iterator<Item = BlobId> {
+        self.storage
+            .get_remote_refs()
+            .await
+            .into_iter()
+            .map(BlobId::RemoteRef)
+    }
+
     /// Retrieve a value to a file on disk.
     ///
     /// If the value doesn't exist in the transaction itself, it will be looked-for in the base
