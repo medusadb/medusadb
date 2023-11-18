@@ -260,7 +260,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             new_root = branch;
         }
 
-        self.set_root(value, new_root);
+        self.set_root(value, new_root).await?;
 
         Ok(result)
     }
@@ -292,7 +292,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                     new_root = branch;
                 }
 
-                self.set_root(value, new_root);
+                self.set_root(value, new_root).await?;
 
                 Some(result)
             }
@@ -319,11 +319,15 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         self.root.meta.total_size
     }
 
-    fn set_root(&mut self, root_id: BlobId, root: TreeBranch) {
+    async fn set_root(&mut self, root_id: BlobId, root: TreeBranch) -> Result<()> {
         tracing::trace!("Updating root from {} to {root_id}.", self.root_id);
+
+        self.transaction.unstore(&self.root_id).await?;
 
         self.root_id = root_id;
         self.root = root;
+
+        Ok(())
     }
 
     async fn search(&self, key: &Key) -> Result<TreeSearchResult> {
@@ -518,5 +522,66 @@ mod tests {
 
         let final_root_id = index.root_id().clone();
         assert_eq!(initial_root_id, final_root_id);
+
+        // Insert 1024 values in the tree to trigger actual transaction writing as well as
+        // rebalancing.
+        for i in 0..1024 {
+            assert_insert_new!(
+                index,
+                i,
+                "this is a rather large value that is self-contained"
+            );
+        }
+
+        assert_transaction_references_count!(tx, 1);
+
+        for i in 0..1024 {
+            assert_remove_exists!(
+                index,
+                i,
+                "this is a rather large value that is self-contained"
+            );
+        }
+
+        assert_empty!(index);
+        assert_total_size!(index, 0);
+
+        assert_transaction_empty!(tx);
+    }
+
+    #[test]
+    fn test_tree_branch_serialization() {
+        let tree_branch = TreeBranch::new(TreeMeta {
+            total_count: 0,
+            total_size: 0,
+            local_key_size: NonZeroU64::new(8).unwrap(),
+        });
+
+        let buf = tree_branch.to_vec();
+        assert_eq!(&[0x92, 0x93, 0x00, 0x00, 0x08, 0x90], buf.as_slice());
+
+        let mut tree_branch = TreeBranch::new(TreeMeta {
+            total_count: 2000,
+            total_size: 987654321,
+            local_key_size: NonZeroU64::new(16).unwrap(),
+        });
+        tree_branch.insert_non_existing(
+            vec![
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+                0x0E, 0x0F, 0x10,
+            ]
+            .into(),
+            blob_id!("foo"),
+        );
+
+        let buf = tree_branch.to_vec();
+        assert_eq!(
+            &[
+                0x92, 0x93, 0xCD, 0x07, 0xD0, 0xCE, 0x3A, 0xDE, 0x68, 0xB1, 0x10, 0x91, 0x92, 196,
+                0x11, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+                0x0D, 0x0E, 0x0F, 0x10, 0xA8, 0x41, 0x32, 0x5A, 0x76, 0x62, 0x77, 0x3D, 0x3D
+            ],
+            buf.as_slice()
+        );
     }
 }

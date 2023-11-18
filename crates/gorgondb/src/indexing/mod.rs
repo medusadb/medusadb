@@ -125,9 +125,17 @@ pub(super) mod tests {
         };
     }
 
+    macro_rules! assert_transaction_references_count {
+        ($tx:ident, $cnt:expr) => {
+            let blobs: Vec<_> = $tx.get_blobs().await.collect();
+
+            assert_eq!(blobs.len(), $cnt);
+        };
+    }
+
     pub(super) use {
         assert_empty, assert_insert_new, assert_insert_update, assert_key_exists,
         assert_key_missing, assert_len, assert_remove_exists, assert_remove_missing,
-        assert_total_size, assert_transaction_empty, blob_id,
+        assert_total_size, assert_transaction_empty, blob_id, assert_transaction_references_count
     };
 }

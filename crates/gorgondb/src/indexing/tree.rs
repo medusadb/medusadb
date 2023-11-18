@@ -286,6 +286,18 @@ impl Display for BinaryTreePathElement {
     }
 }
 
+impl From<u8> for BinaryTreePathElement {
+    fn from(value: u8) -> Self {
+        Self(vec![value].into())
+    }
+}
+
+impl From<Vec<u8>> for BinaryTreePathElement {
+    fn from(value: Vec<u8>) -> Self {
+        Self(value.into())
+    }
+}
+
 impl TryFrom<Bytes> for BinaryTreePathElement {
     type Error = TreePathElementError;
 
