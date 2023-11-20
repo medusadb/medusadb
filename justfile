@@ -2,6 +2,7 @@ alias b := build
 alias t := test
 alias c := check
 alias d := doc
+alias be := bench
 
 export RUSTDOCFLAGS := "-D warnings"
 
@@ -27,6 +28,9 @@ check:
 
 doc:
   cargo doc --workspace --no-deps
+
+bench:
+  cargo bench
 
 dev-setup: check-setup test-setup
   cargo install cargo-insta cargo-lambda cargo-update

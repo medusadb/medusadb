@@ -33,13 +33,17 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// # Handling remote-references
 ///
 /// Remote references are designed to be printable and - as such - parseable.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, DeserializeFromStr, SerializeDisplay,
-)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, DeserializeFromStr, SerializeDisplay)]
 pub struct RemoteRef {
     pub(crate) ref_size: u64,
     pub(crate) hash_algorithm: HashAlgorithm,
     pub(crate) hash: Cow<'static, [u8]>,
+}
+
+impl std::fmt::Debug for RemoteRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RemoteRef").field(&self.to_string()).finish()
+    }
 }
 
 impl RemoteRef {

@@ -3,7 +3,7 @@
 mod fixed_size;
 mod tree;
 
-pub use fixed_size::FixedSizeIndex;
+pub use fixed_size::{FixedSizeIndex, FixedSizeKey};
 pub use tree::{
     BinaryTreePath, BinaryTreePathElement, Tree, TreeBranch, TreePath, TreeSearchResult,
     TreeSearchStack,
@@ -136,6 +136,6 @@ pub(super) mod tests {
     pub(super) use {
         assert_empty, assert_insert_new, assert_insert_update, assert_key_exists,
         assert_key_missing, assert_len, assert_remove_exists, assert_remove_missing,
-        assert_total_size, assert_transaction_empty, blob_id, assert_transaction_references_count
+        assert_total_size, assert_transaction_empty, assert_transaction_references_count, blob_id,
     };
 }

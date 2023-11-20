@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{gorgon::StoreOptions, BlobId, Transaction};
 
-use super::{BinaryTreePath, BinaryTreePathElement, Error};
+use super::{tree::TreeItem, BinaryTreePath, BinaryTreePathElement, Error};
 
 /// A trait for types that can be used as a fixed-size key.
 pub trait FixedSizeKey: Sized + Ord + Eq {
@@ -89,6 +89,17 @@ struct TreeMeta {
     local_key_size: NonZeroU64,
 }
 
+impl TreeMeta {
+    pub(crate) fn adjust_total_size<E: std::fmt::Debug>(
+        &mut self,
+        diff: impl TryInto<i128, Error = E>,
+    ) {
+        let total_size: i128 = self.total_size.try_into().expect("should fit into a i128");
+        let total_size = total_size + diff.try_into().expect("should fit into a i128");
+        self.total_size = total_size.try_into().expect("should fit into a i64");
+    }
+}
+
 /// A distributed map that stores key with a fixed-size.
 #[derive(Debug)]
 pub struct FixedSizeIndex<'t, Key> {
@@ -96,9 +107,14 @@ pub struct FixedSizeIndex<'t, Key> {
     root_id: BlobId,
     root: TreeBranch,
     transaction: &'t Transaction,
+    min_count: usize,
+    max_count: usize,
 }
 
 impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
+    const DEFAULT_MIN_COUNT: usize = 256;
+    const DEFAULT_MAX_COUNT: usize = 1024;
+
     /// Instantiate a new, empty, index.
     pub async fn initialize(transaction: &'t Transaction) -> Result<Self> {
         // A new tree has no children and a local key size of exactly the full key size,=.
@@ -117,6 +133,8 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             root,
             root_id,
             transaction,
+            min_count: Self::DEFAULT_MIN_COUNT,
+            max_count: Self::DEFAULT_MAX_COUNT,
         })
     }
 
@@ -140,7 +158,26 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             root,
             root_id,
             transaction,
+            min_count: Self::DEFAULT_MIN_COUNT,
+            max_count: Self::DEFAULT_MAX_COUNT,
         })
+    }
+
+    /// Clear the index.
+    pub async fn clear(&mut self) -> Result<()> {
+        // A new tree has no children and a local key size of exactly the full key size,=.
+        let root = TreeBranch::new(TreeMeta {
+            total_count: 0,
+            total_size: 0,
+            local_key_size: Key::KEY_SIZE,
+        });
+
+        let root_id = self
+            .transaction
+            .store(root.to_vec(), &StoreOptions::default())
+            .await?;
+
+        self.set_root(root_id, root).await
     }
 
     /// Get the root id for the index.
@@ -179,7 +216,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
         let result;
         let count_diff: u64;
-        let size_diff: u64;
+        let size_diff: i128;
 
         let (stack, mut new_root) = match self.search(key).await? {
             TreeSearchResult::Found { stack } => {
@@ -194,12 +231,14 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
                 // Set the parameters for the stack update.
                 count_diff = 0;
-                size_diff = new_size - old_value.size();
+                let new_size: i128 = new_size.try_into().expect("should fit a i128");
+                let old_size: i128 = old_value.size().try_into().expect("should fit a i128");
+                size_diff = new_size - old_size;
 
                 result = Some(old_value.clone());
 
                 entry.replace(value);
-                branch.meta.total_size += size_diff;
+                branch.meta.adjust_total_size(size_diff);
                 branch.meta.total_count += count_diff;
                 value = self.persist_branch(&branch).await?;
 
@@ -213,12 +252,12 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 // Set the parameters for the stack update.
                 // There was no such key, so no previous value to return.
                 count_diff = 1;
-                size_diff = new_size;
+                size_diff = new_size.try_into().expect("should fit into a i128");
                 result = None;
 
                 // There is some more key material to create under the missing key:
                 // start with this.
-                if let Some(next_key) = next_key {
+                let has_leafs = if let Some(next_key) = next_key {
                     let meta = TreeMeta {
                         total_size: new_size,
                         total_count: count_diff,
@@ -228,7 +267,11 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                     let branch = TreeBranch::new_with_single_child(meta, next_key, value);
 
                     value = self.persist_branch(&branch).await?;
-                }
+
+                    false
+                } else {
+                    true
+                };
 
                 // If we were to return the stack as-is, its top element would NOT have the
                 // associated key, which is not what we want. So we pop it here and deal with
@@ -239,6 +282,10 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 branch.meta.total_size += new_size;
                 branch.meta.total_count += count_diff;
                 branch.insert_non_existing(child_key, value);
+
+                let branch = self
+                    .factorize(branch, self.min_count, self.max_count, has_leafs)
+                    .await?;
 
                 value = self.persist_branch(&branch).await?;
 
@@ -253,8 +300,12 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             let old_value = branch.replace_existing(&child_key, value);
 
             self.transaction.unstore(&old_value).await?;
-            branch.meta.total_size += size_diff;
+            branch.meta.adjust_total_size(size_diff);
             branch.meta.total_count += count_diff;
+
+            let branch = self
+                .factorize(branch, self.min_count, self.max_count, false)
+                .await?;
 
             value = self.persist_branch(&branch).await?;
             new_root = branch;
@@ -275,24 +326,43 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
                 let result = branch.occupied_entry(&child_key).remove();
 
-                branch.meta.total_size -= result.size();
-                branch.meta.total_count -= 1;
-
-                let mut value = self.persist_branch(&branch).await?;
-                let mut new_root = branch;
-
-                for (mut branch, child_key) in stack {
-                    let old_value = branch.replace_existing(&child_key, value);
-
-                    self.transaction.unstore(&old_value).await?;
+                let mut value = if branch.children.is_empty() {
+                    None
+                } else {
                     branch.meta.total_size -= result.size();
                     branch.meta.total_count -= 1;
 
-                    value = self.persist_branch(&branch).await?;
+                    Some(self.persist_branch(&branch).await?)
+                };
+
+                let mut new_root = branch;
+
+                for (mut branch, child_key) in stack {
+                    let old_value = if let Some(value) = value {
+                        branch.replace_existing(&child_key, value)
+                    } else {
+                        branch.remove_existing(&child_key)
+                    };
+
+                    self.transaction.unstore(&old_value).await?;
+
+                    value = if branch.children.is_empty() {
+                        None
+                    } else {
+                        branch.meta.total_size -= result.size();
+                        branch.meta.total_count -= 1;
+
+                        Some(self.persist_branch(&branch).await?)
+                    };
+
                     new_root = branch;
                 }
 
-                self.set_root(value, new_root).await?;
+                if let Some(value) = value {
+                    self.set_root(value, new_root).await?;
+                } else {
+                    self.clear().await?;
+                }
 
                 Some(result)
             }
@@ -425,6 +495,113 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             },
         )
     }
+
+    /// Factorize the specified branch, using the specified parameters.
+    async fn factorize(
+        &self,
+        mut branch: TreeBranch,
+        min_count: usize,
+        max_count: usize,
+        has_leafs: bool,
+    ) -> Result<TreeBranch> {
+        if branch.children.len() <= max_count {
+            return Ok(branch);
+        }
+
+        let mut key_size = NonZeroU64::new(1).unwrap();
+        let mut buckets =
+            Vec::<(BinaryTreePathElement, Vec<_>)>::with_capacity(branch.children.len());
+
+        loop {
+            buckets.clear();
+
+            if key_size >= branch.meta.local_key_size {
+                return Ok(branch);
+            }
+
+            for TreeItem(key, blob_id) in &branch.children {
+                let (key, next_key) = Self::split_key(key.0.clone(), key_size);
+                let next_key = next_key.expect("there should always be a next key");
+
+                match buckets.last_mut() {
+                    Some(last) if last.0 == key => {
+                        last.1.push((next_key, blob_id));
+                    }
+                    _ => buckets.push((key, vec![(next_key, blob_id)])),
+                };
+            }
+
+            // If we have enough different buckets, use that.
+            //
+            // We don't need to check if we don't have to many buckets, because we start with the
+            // smaller possible key size, and as a result, any future attempt will yield at least
+            // as many buckets anyway.
+            if buckets.len() >= min_count {
+                break;
+            }
+
+            key_size = key_size
+                .checked_add(1)
+                .expect("addition should always be possible");
+        }
+
+        let remaining_key_size = NonZeroU64::new(branch.meta.local_key_size.get() - key_size.get())
+            .expect("should not be zero");
+
+        tracing::debug!(
+            "Factorizing tree branch from {} children to {}.",
+            branch.children.len(),
+            buckets.len()
+        );
+
+        let mut children = Vec::with_capacity(buckets.len());
+
+        for (key, sub_children) in buckets {
+            let blob_id = {
+                let children: Vec<TreeItem<_>> = sub_children
+                    .into_iter()
+                    .map(|(key, blob_id)| TreeItem(BinaryTreePathElement(key), blob_id.clone()))
+                    .collect();
+
+                let meta = if has_leafs {
+                    let total_size = children.iter().map(|item| item.1.size()).sum();
+
+                    TreeMeta {
+                        total_count: children
+                            .len()
+                            .try_into()
+                            .expect("conversion to u64 should succeed"),
+                        total_size,
+                        local_key_size: remaining_key_size,
+                    }
+                } else {
+                    let (mut total_count, mut total_size) = (0, 0);
+
+                    for TreeItem(_, blob_id) in &children {
+                        let branch = self.fetch_branch(blob_id).await?;
+                        total_count += branch.meta.total_count;
+                        total_size += branch.meta.total_size;
+                    }
+
+                    TreeMeta {
+                        total_count,
+                        total_size,
+                        local_key_size: remaining_key_size,
+                    }
+                };
+
+                let branch = TreeBranch { meta, children };
+                self.persist_branch(&branch).await?
+            };
+
+            children.push(TreeItem(key, blob_id));
+        }
+
+        branch.meta.local_key_size = key_size;
+        branch.children = children;
+
+        Ok(branch)
+    }
 }
 
 #[cfg(test)]
@@ -522,6 +699,22 @@ mod tests {
 
         let final_root_id = index.root_id().clone();
         assert_eq!(initial_root_id, final_root_id);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_fixed_size_index_populated() {
+        let client = Client::new_for_tests();
+        let tx = client.start_transaction().unwrap();
+
+        assert_transaction_empty!(tx);
+
+        let mut index = FixedSizeIndex::<'_, u64>::initialize(&tx).await.unwrap();
+
+        index.min_count = 4;
+        index.max_count = 256; // This will force a factorization for each byte of the key.
+
+        assert_transaction_empty!(tx);
 
         // Insert 1024 values in the tree to trigger actual transaction writing as well as
         // rebalancing.
@@ -533,16 +726,28 @@ mod tests {
             );
         }
 
-        assert_transaction_references_count!(tx, 1);
+        // Since 1024 is perfectly divisible by 4 we end up with 4 root nodes that have exactly the
+        // same children, hence only one actual reference (saving 75% of the space).
+        //
+        // So the root node + the sub-node makes 2 total references.
+        assert_transaction_references_count!(tx, 2);
 
         for i in 0..1024 {
-            assert_remove_exists!(
+            assert_insert_update!(
                 index,
                 i,
+                "this is a new value which is also rather large",
                 "this is a rather large value that is self-contained"
             );
         }
 
+        assert_transaction_references_count!(tx, 2);
+
+        for i in 0..1024 {
+            assert_remove_exists!(index, i, "this is a new value which is also rather large");
+        }
+
+        assert_transaction_empty!(tx);
         assert_empty!(index);
         assert_total_size!(index, 0);
 

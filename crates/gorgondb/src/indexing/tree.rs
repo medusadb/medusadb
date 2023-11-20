@@ -45,7 +45,7 @@ impl<KeyElem: Serialize, Meta: Serialize> Tree<KeyElem, Meta> {
 pub struct TreeBranch<KeyElem, Meta> {
     pub(crate) meta: Meta,
 
-    children: Vec<TreeItem<KeyElem>>,
+    pub(crate) children: Vec<TreeItem<KeyElem>>,
 }
 
 impl<KeyElem, Meta: Default> Default for TreeBranch<KeyElem, Meta> {
@@ -128,6 +128,13 @@ impl<KeyElem: Ord, Meta> TreeBranch<KeyElem, Meta> {
         self.occupied_entry(key).replace(id)
     }
 
+    /// Remove a child from the branch, that is guaranteed to already be present.
+    ///
+    /// Returns the previous value.
+    pub fn remove_existing(&mut self, key: &KeyElem) -> BlobId {
+        self.occupied_entry(key).remove()
+    }
+
     /// Insert a child into the branch, that is guaranteed to not exist yet.
     pub fn insert_non_existing(&mut self, key: KeyElem, id: BlobId) {
         match self.entry(key) {
@@ -201,7 +208,7 @@ impl<'b, KeyElem, Meta> TreeBranchVacantEntry<'b, KeyElem, Meta> {
 
 /// A tree item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TreeItem<KeyElem>(KeyElem, BlobId);
+pub(crate) struct TreeItem<KeyElem>(pub(crate) KeyElem, pub(crate) BlobId);
 
 /// A path in a tree.
 #[derive(Debug, Clone)]

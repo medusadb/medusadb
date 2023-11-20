@@ -41,9 +41,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// storing data in GorgonDB.
 /// - A ledger ``BlobId`` is a ``BlobId`` that points to a list of other blob ids and represents big
 /// blobs of data separated in smaller chunks.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, DeserializeFromStr, SerializeDisplay,
-)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, DeserializeFromStr, SerializeDisplay)]
 pub enum BlobId {
     /// The ``BlobId`` contains the data directly.
     ///
@@ -62,6 +60,22 @@ pub enum BlobId {
     },
 }
 
+impl std::fmt::Debug for BlobId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SelfContained(_) => f
+                .debug_tuple("SelfContained")
+                .field(&self.to_string())
+                .finish(),
+            Self::RemoteRef(_) => f.debug_tuple("RemoteRef").field(&self.to_string()).finish(),
+            Self::Ledger { ref_size, blob_id } => f
+                .debug_struct("Ledger")
+                .field("ref_size", ref_size)
+                .field("blob_id", blob_id)
+                .finish(),
+        }
+    }
+}
 impl BlobId {
     /// The maximum size of self-contained values.
     pub const MAX_SELF_CONTAINED_SIZE: u64 = 63;
