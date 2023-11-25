@@ -244,7 +244,8 @@ skip = [
     { name = "redox_syscall", version = ">=0.2.16" },
     { name = "regex-automata", version = ">=0.1.10" },
     { name = "regex-syntax", version = ">=0.6.29" },
-    { name = "socket2", version = ">=0.4.9" },
+    { name = "socket2", version = ">=0.4.10" },
+    { name = "crypto-bigint", version = ">=0.4.9" },
 ]
 # Similarly to `skip` allows you to skip certain crates during duplicate
 # detection. Unlike skip, it also includes the entire tree of transitive
