@@ -31,12 +31,18 @@ pub trait FixedSizeKey: Sized + Ord + Eq {
 }
 
 impl FixedSizeKey for u8 {
+    /// The size of the key.
+    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(size_of::<Self>() as u64) };
+
     fn to_bytes(&self) -> Bytes {
         vec![*self].into()
     }
 }
 
 impl FixedSizeKey for u16 {
+    /// The size of the key.
+    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(size_of::<Self>() as u64) };
+
     fn to_bytes(&self) -> Bytes {
         let mut buf = Self::make_buf();
         byteorder::NetworkEndian::write_u16(&mut buf, *self);
@@ -46,6 +52,9 @@ impl FixedSizeKey for u16 {
 }
 
 impl FixedSizeKey for u32 {
+    /// The size of the key.
+    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(size_of::<Self>() as u64) };
+
     fn to_bytes(&self) -> Bytes {
         let mut buf = Self::make_buf();
         byteorder::NetworkEndian::write_u32(&mut buf, *self);
@@ -55,6 +64,9 @@ impl FixedSizeKey for u32 {
 }
 
 impl FixedSizeKey for u64 {
+    /// The size of the key.
+    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(size_of::<Self>() as u64) };
+
     fn to_bytes(&self) -> Bytes {
         let mut buf = Self::make_buf();
         byteorder::NetworkEndian::write_u64(&mut buf, *self);
@@ -64,6 +76,9 @@ impl FixedSizeKey for u64 {
 }
 
 impl FixedSizeKey for u128 {
+    /// The size of the key.
+    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(size_of::<Self>() as u64) };
+
     fn to_bytes(&self) -> Bytes {
         let mut buf = Self::make_buf();
         byteorder::NetworkEndian::write_u128(&mut buf, *self);
@@ -84,9 +99,6 @@ struct TreeMeta {
 
     /// The total size of data under this node, not counting the size of intermediate nodes.
     total_size: u64,
-
-    /// The local key size for this node.
-    local_key_size: NonZeroU64,
 }
 
 impl TreeMeta {
@@ -97,6 +109,14 @@ impl TreeMeta {
         let total_size: i128 = self.total_size.try_into().expect("should fit into a i128");
         let total_size = total_size + diff.try_into().expect("should fit into a i128");
         self.total_size = total_size.try_into().expect("should fit into a i64");
+    }
+}
+
+impl TreeBranch {
+    fn local_key_size(&self) -> Option<NonZeroU64> {
+        self.children.first().and_then(|TreeItem(key, _)| {
+            NonZeroU64::new(key.0.len().try_into().expect("should convert to u64"))
+        })
     }
 }
 
@@ -121,7 +141,6 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         let root = TreeBranch::new(TreeMeta {
             total_count: 0,
             total_size: 0,
-            local_key_size: Key::KEY_SIZE,
         });
 
         let root_id = transaction
@@ -142,15 +161,16 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
     pub async fn load(transaction: &'t Transaction, root_id: BlobId) -> Result<Self> {
         let root = Self::fetch_branch_tx(transaction, &root_id).await?;
 
-        if root.meta.local_key_size > Key::KEY_SIZE {
-            return Err(Error::CorruptedTree {
-                path: BinaryTreePath::default(),
-                err: format!(
-                    "root branch has an invalid local key size of {} when at most {} was expected",
-                    root.meta.local_key_size,
-                    Key::KEY_SIZE
-                ),
-            });
+        if let Some(local_key_size) = root.local_key_size() {
+            if local_key_size > Key::KEY_SIZE {
+                return Err(Error::CorruptedTree {
+                    path: BinaryTreePath::default(),
+                    err: format!(
+                        "root branch has an invalid local key size of {local_key_size} when at most {} was expected",
+                        Key::KEY_SIZE
+                    ),
+                });
+            }
         }
 
         Ok(Self {
@@ -169,7 +189,6 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         let root = TreeBranch::new(TreeMeta {
             total_count: 0,
             total_size: 0,
-            local_key_size: Key::KEY_SIZE,
         });
 
         let root_id = self
@@ -261,7 +280,6 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                     let meta = TreeMeta {
                         total_size: new_size,
                         total_count: count_diff,
-                        local_key_size: next_key.size(),
                     };
 
                     let branch = TreeBranch::new_with_single_child(meta, next_key, value);
@@ -346,13 +364,17 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
                     self.transaction.unstore(&old_value).await?;
 
-                    value = if branch.children.is_empty() {
-                        None
+                    (value, branch) = if branch.children.is_empty() {
+                        (None, branch)
                     } else {
                         branch.meta.total_size -= result.size();
                         branch.meta.total_count -= 1;
 
-                        Some(self.persist_branch(&branch).await?)
+                        let branch = self
+                            .distribute(branch, self.min_count, self.max_count)
+                            .await?;
+
+                        (Some(self.persist_branch(&branch).await?), branch)
                     };
 
                     new_root = branch;
@@ -409,7 +431,8 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             .expect("key size should convert to usize");
         assert_eq!(key.len(), expected_key_size);
 
-        let (child_key, next_key) = Self::split_key(key, self.root.meta.local_key_size);
+        let local_key_size = self.root.local_key_size().unwrap_or(Key::KEY_SIZE);
+        let (child_key, next_key) = Self::split_key(key, local_key_size);
         let stack = TreeSearchStack::new(self.root.clone(), child_key);
 
         self.search_from(stack, next_key).await
@@ -429,9 +452,17 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                         Some(next_key) => {
                             let id = entry.value();
                             let branch = self.fetch_branch(id).await?;
+                            let local_key_size = match branch.local_key_size() {
+                                Some(local_key_size) => local_key_size,
+                                None => {
+                                    return Err(Error::CorruptedTree {
+                                        path: stack.into_path(),
+                                        err: "non-root branch has no children".to_owned(),
+                                    });
+                                }
+                            };
 
-                            let (child_key, next_key) =
-                                Self::split_key(next_key, branch.meta.local_key_size);
+                            let (child_key, next_key) = Self::split_key(next_key, local_key_size);
                             stack.push(branch, child_key);
 
                             self.search_from(stack, next_key).await
@@ -496,6 +527,14 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         )
     }
 
+    /// Join two keys.
+    fn join_key(
+        left: BinaryTreePathElement,
+        right: BinaryTreePathElement,
+    ) -> BinaryTreePathElement {
+        BinaryTreePathElement([left.0, right.0].concat().into())
+    }
+
     /// Factorize the specified branch, using the specified parameters.
     async fn factorize(
         &self,
@@ -507,6 +546,10 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         if branch.children.len() <= max_count {
             return Ok(branch);
         }
+        let local_key_size = match branch.local_key_size() {
+            Some(local_key_size) => local_key_size,
+            None => return Ok(branch),
+        };
 
         let mut key_size = NonZeroU64::new(1).unwrap();
         let mut buckets =
@@ -515,7 +558,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         loop {
             buckets.clear();
 
-            if key_size >= branch.meta.local_key_size {
+            if key_size >= local_key_size {
                 return Ok(branch);
             }
 
@@ -545,9 +588,6 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 .expect("addition should always be possible");
         }
 
-        let remaining_key_size = NonZeroU64::new(branch.meta.local_key_size.get() - key_size.get())
-            .expect("should not be zero");
-
         tracing::debug!(
             "Factorizing tree branch from {} children to {}.",
             branch.children.len(),
@@ -572,7 +612,6 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                             .try_into()
                             .expect("conversion to u64 should succeed"),
                         total_size,
-                        local_key_size: remaining_key_size,
                     }
                 } else {
                     let (mut total_count, mut total_size) = (0, 0);
@@ -586,7 +625,6 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                     TreeMeta {
                         total_count,
                         total_size,
-                        local_key_size: remaining_key_size,
                     }
                 };
 
@@ -597,10 +635,44 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             children.push(TreeItem(key, blob_id));
         }
 
-        branch.meta.local_key_size = key_size;
         branch.children = children;
 
         Ok(branch)
+    }
+
+    /// Distribute the specified branch, possibly reducing its depth.
+    ///
+    /// This method should not be called on branches that have leaf nodes.
+    async fn distribute(
+        &self,
+        mut branch: TreeBranch,
+        min_count: usize,
+        max_count: usize,
+    ) -> Result<TreeBranch> {
+        if branch.children.len() >= min_count
+            || branch.meta.total_count < max_count.try_into().expect("should convert to u64")
+        {
+            return Ok(branch);
+        }
+
+        let mut children = Vec::with_capacity(branch.children.capacity());
+
+        for TreeItem(key, blob_id) in &branch.children {
+            let sub_branch = self.fetch_branch(blob_id).await?;
+
+            children.reserve(sub_branch.children.len());
+
+            for TreeItem(sub_key, blob_id) in sub_branch.children {
+                let new_key = Self::join_key(key.clone(), sub_key);
+                children.push(TreeItem(new_key, blob_id));
+            }
+
+            self.transaction.unstore(blob_id).await?;
+        }
+
+        branch.children = children;
+
+        self.factorize(branch, min_count, max_count, false).await
     }
 }
 
@@ -759,16 +831,14 @@ mod tests {
         let tree_branch = TreeBranch::new(TreeMeta {
             total_count: 0,
             total_size: 0,
-            local_key_size: NonZeroU64::new(8).unwrap(),
         });
 
         let buf = tree_branch.to_vec();
-        assert_eq!(&[0x92, 0x93, 0x00, 0x00, 0x08, 0x90], buf.as_slice());
+        assert_eq!(&[0x92, 0x92, 0x00, 0x00, 0x90], buf.as_slice());
 
         let mut tree_branch = TreeBranch::new(TreeMeta {
             total_count: 2000,
             total_size: 987654321,
-            local_key_size: NonZeroU64::new(16).unwrap(),
         });
         tree_branch.insert_non_existing(
             vec![
@@ -782,9 +852,9 @@ mod tests {
         let buf = tree_branch.to_vec();
         assert_eq!(
             &[
-                0x92, 0x93, 0xCD, 0x07, 0xD0, 0xCE, 0x3A, 0xDE, 0x68, 0xB1, 0x10, 0x91, 0x92, 196,
-                0x11, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
-                0x0D, 0x0E, 0x0F, 0x10, 0xA8, 0x41, 0x32, 0x5A, 0x76, 0x62, 0x77, 0x3D, 0x3D
+                0x92, 0x92, 0xCD, 0x07, 0xD0, 0xCE, 0x3A, 0xDE, 0x68, 0xB1, 0x91, 0x92, 196, 0x11,
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+                0x0E, 0x0F, 0x10, 0xA8, 0x41, 0x32, 0x5A, 0x76, 0x62, 0x77, 0x3D, 0x3D
             ],
             buf.as_slice()
         );
