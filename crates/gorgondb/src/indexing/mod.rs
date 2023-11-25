@@ -1,12 +1,13 @@
 //! Indexing facilities.
 
+mod cache;
 mod fixed_size;
 mod tree;
 
+pub(crate) use cache::Cache;
 pub use fixed_size::{FixedSizeIndex, FixedSizeKey};
 pub use tree::{
-    BinaryTreePath, BinaryTreePathElement, Tree, TreeBranch, TreePath, TreeSearchResult,
-    TreeSearchStack,
+    BinaryTreePath, BinaryTreePathElement, TreeBranch, TreePath, TreeSearchResult, TreeSearchStack,
 };
 
 /// An error type.

@@ -43,6 +43,7 @@ fs4.workspace = true
 hex.workspace = true
 http.workspace = true
 humansize.workspace = true
+lru.workspace = true
 itertools.workspace = true
 num-integer.workspace = true
 reflink.workspace = true

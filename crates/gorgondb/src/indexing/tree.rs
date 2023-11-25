@@ -10,33 +10,19 @@ use crate::BlobId;
 
 use super::Error;
 
-/// A tree.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Tree<KeyElem, Meta> {
-    /// A branch.
-    Branch(TreeBranch<KeyElem, Meta>),
-
-    /// A leaf.
-    Leaf(BlobId),
-}
-
-impl<KeyElem, Meta: Default> Default for Tree<KeyElem, Meta> {
-    fn default() -> Self {
-        Self::Branch(TreeBranch::default())
-    }
-}
-
-impl<KeyElem: DeserializeOwned, Meta: DeserializeOwned> Tree<KeyElem, Meta> {
-    /// Deserialize the tree from a slice of bytes.
-    pub fn from_slice(input: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
-        rmp_serde::from_slice(input)
-    }
-}
-
-impl<KeyElem: Serialize, Meta: Serialize> Tree<KeyElem, Meta> {
+/// A trait for types that can be serialized using MessagePack.
+pub trait ByteSerialize: Serialize {
     /// Serialize the tree as a vector of bytes.
-    pub fn to_vec(&self) -> Vec<u8> {
+    fn to_vec(&self) -> Vec<u8> {
         rmp_serde::to_vec(self).expect("serialization should never fail")
+    }
+}
+
+/// A trait for types that can be deserialized using MessagePack.
+pub trait ByteDeserialize: for<'a> Deserialize<'a> {
+    /// Deserialize the tree from a slice of bytes.
+    fn from_slice(input: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
+        rmp_serde::from_slice(input)
     }
 }
 
@@ -57,19 +43,11 @@ impl<KeyElem, Meta: Default> Default for TreeBranch<KeyElem, Meta> {
     }
 }
 
-impl<KeyElem: DeserializeOwned, Meta: DeserializeOwned> TreeBranch<KeyElem, Meta> {
-    /// Deserialize the tree from a slice of bytes.
-    pub fn from_slice(input: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
-        rmp_serde::from_slice(input)
-    }
+impl<KeyElem: DeserializeOwned, Meta: DeserializeOwned> ByteDeserialize
+    for TreeBranch<KeyElem, Meta>
+{
 }
-
-impl<KeyElem: Serialize, Meta: Serialize> TreeBranch<KeyElem, Meta> {
-    /// Serialize the tree as a vector of bytes.
-    pub fn to_vec(&self) -> Vec<u8> {
-        rmp_serde::to_vec(self).expect("serialization should never fail")
-    }
-}
+impl<KeyElem: Serialize, Meta: Serialize> ByteSerialize for TreeBranch<KeyElem, Meta> {}
 
 impl<KeyElem: Ord, Meta> TreeBranch<KeyElem, Meta> {
     /// Create a new tree branch with no children.

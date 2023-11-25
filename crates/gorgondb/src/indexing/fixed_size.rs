@@ -1,4 +1,8 @@
-use std::{marker::PhantomData, mem::size_of, num::NonZeroU64};
+use std::{
+    marker::PhantomData,
+    mem::size_of,
+    num::{NonZeroU64, NonZeroUsize},
+};
 
 use byteorder::ByteOrder;
 use bytes::Bytes;
@@ -7,7 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{gorgon::StoreOptions, BlobId, Transaction};
 
-use super::{tree::TreeItem, BinaryTreePath, BinaryTreePathElement, Error};
+use super::{
+    tree::{ByteDeserialize, ByteSerialize, TreeItem},
+    BinaryTreePath, BinaryTreePathElement, Cache, Error,
+};
 
 /// A trait for types that can be used as a fixed-size key.
 pub trait FixedSizeKey: Sized + Ord + Eq {
@@ -137,15 +144,8 @@ impl Default for TreeRoot {
     }
 }
 
-impl TreeRoot {
-    fn from_slice(input: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
-        rmp_serde::from_slice(input)
-    }
-
-    fn to_vec(&self) -> Vec<u8> {
-        rmp_serde::to_vec(self).expect("serialization should never fail")
-    }
-}
+impl ByteSerialize for TreeRoot {}
+impl ByteDeserialize for TreeRoot {}
 
 /// A distributed map that stores key with a fixed-size.
 #[derive(Debug)]
@@ -153,6 +153,7 @@ pub struct FixedSizeIndex<'t, Key> {
     _phantom: PhantomData<Key>,
     root: TreeRoot,
     transaction: &'t Transaction,
+    cache: Cache<TreeBranch>,
 }
 
 impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
@@ -165,6 +166,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             _phantom: Default::default(),
             root,
             transaction,
+            cache: Cache::new(NonZeroUsize::new(1024).unwrap()),
         })
     }
 
@@ -176,6 +178,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             _phantom: Default::default(),
             root,
             transaction,
+            cache: Cache::new(NonZeroUsize::new(1024).unwrap()),
         })
     }
 
@@ -278,7 +281,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 entry.replace(value);
                 branch.meta.adjust_total_size(size_diff);
                 branch.meta.total_count += count_diff;
-                value = self.persist_branch(&branch).await?;
+                value = self.persist_branch(branch).await?;
 
                 // Note: since the old value is pointing to an externally provided blob id (not a
                 // tree node blob id), we don't actually `unstore` it here as it is not our
@@ -306,7 +309,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
                     let branch = TreeBranch::new_with_single_child(meta, next_key, value);
 
-                    value = self.persist_branch(&branch).await?;
+                    value = self.persist_branch(branch).await?;
 
                     false
                 } else {
@@ -326,7 +329,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                         .factorize(branch, self.root.min_count, self.root.max_count, has_leafs)
                         .await?;
 
-                    value = self.persist_branch(&branch).await?;
+                    value = self.persist_branch(branch).await?;
                 }
 
                 stack
@@ -347,7 +350,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 .factorize(branch, self.root.min_count, self.root.max_count, false)
                 .await?;
 
-            value = self.persist_branch(&branch).await?;
+            value = self.persist_branch(branch).await?;
         }
 
         self.set_root_branch_id(Some(value)).await?;
@@ -371,7 +374,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                     branch.meta.total_size -= result.size();
                     branch.meta.total_count -= 1;
 
-                    Some(self.persist_branch(&branch).await?)
+                    Some(self.persist_branch(branch).await?)
                 };
 
                 for (mut branch, child_key) in stack {
@@ -393,7 +396,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                             .distribute(branch, self.root.min_count, self.root.max_count)
                             .await?;
 
-                        Some(self.persist_branch(&branch).await?)
+                        Some(self.persist_branch(branch).await?)
                     };
                 }
 
@@ -540,16 +543,23 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
     }
 
     async fn fetch_branch(&self, id: &BlobId) -> Result<TreeBranch> {
-        Self::fetch_branch_tx(self.transaction, id).await
+        match self.cache.get(id) {
+            Some(branch) => Ok(branch.clone()),
+            None => Self::fetch_branch_tx(self.transaction, id).await,
+        }
     }
 
-    async fn persist_branch(&self, branch: &TreeBranch) -> Result<BlobId> {
+    async fn persist_branch(&mut self, branch: TreeBranch) -> Result<BlobId> {
         let data = branch.to_vec();
 
-        self.transaction
+        let blob_id = self
+            .transaction
             .store(data, &StoreOptions::default())
-            .await
-            .map_err(Into::into)
+            .await?;
+
+        self.cache.set(blob_id.clone(), branch);
+
+        Ok(blob_id)
     }
 
     /// Split the specified key at the specified size.
@@ -584,7 +594,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
     /// Factorize the specified branch, using the specified parameters.
     async fn factorize(
-        &self,
+        &mut self,
         mut branch: TreeBranch,
         min_count: u64,
         max_count: u64,
@@ -676,7 +686,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 };
 
                 let branch = TreeBranch { meta, children };
-                self.persist_branch(&branch).await?
+                self.persist_branch(branch).await?
             };
 
             children.push(TreeItem(key, blob_id));
@@ -691,7 +701,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
     ///
     /// This method should not be called on branches that have leaf nodes.
     async fn distribute(
-        &self,
+        &mut self,
         mut branch: TreeBranch,
         min_count: u64,
         max_count: u64,
