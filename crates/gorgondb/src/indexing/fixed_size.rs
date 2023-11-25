@@ -87,12 +87,12 @@ impl FixedSizeKey for u128 {
     }
 }
 
-type Result<T> = std::result::Result<T, Error<BinaryTreePathElement>>;
+type Result<T, E = Error<BinaryTreePathElement>> = std::result::Result<T, E>;
 type TreeBranch = super::TreeBranch<BinaryTreePathElement, TreeMeta>;
 type TreeSearchStack = super::TreeSearchStack<BinaryTreePathElement, TreeMeta>;
 type TreeSearchResult = super::TreeSearchResult<BinaryTreePathElement, TreeMeta>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct TreeMeta {
     /// The total count of leaf nodes under this node, both directly and indirectly.
     total_count: u64,
@@ -120,97 +120,116 @@ impl TreeBranch {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TreeRoot {
+    branch_id: Option<BlobId>,
+    min_count: u64,
+    max_count: u64,
+}
+
+impl Default for TreeRoot {
+    fn default() -> Self {
+        Self {
+            branch_id: None,
+            min_count: 256,
+            max_count: 1024,
+        }
+    }
+}
+
+impl TreeRoot {
+    fn from_slice(input: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
+        rmp_serde::from_slice(input)
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        rmp_serde::to_vec(self).expect("serialization should never fail")
+    }
+}
+
 /// A distributed map that stores key with a fixed-size.
 #[derive(Debug)]
 pub struct FixedSizeIndex<'t, Key> {
     _phantom: PhantomData<Key>,
-    root_id: BlobId,
-    root: TreeBranch,
+    root: TreeRoot,
     transaction: &'t Transaction,
-    min_count: usize,
-    max_count: usize,
 }
 
 impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
-    const DEFAULT_MIN_COUNT: usize = 256;
-    const DEFAULT_MAX_COUNT: usize = 1024;
-
     /// Instantiate a new, empty, index.
     pub async fn initialize(transaction: &'t Transaction) -> Result<Self> {
         // A new tree has no children and a local key size of exactly the full key size,=.
-        let root = TreeBranch::new(TreeMeta {
-            total_count: 0,
-            total_size: 0,
-        });
-
-        let root_id = transaction
-            .store(root.to_vec(), &StoreOptions::default())
-            .await?;
+        let root = TreeRoot::default();
 
         Ok(Self {
             _phantom: Default::default(),
             root,
-            root_id,
             transaction,
-            min_count: Self::DEFAULT_MIN_COUNT,
-            max_count: Self::DEFAULT_MAX_COUNT,
         })
     }
 
     /// Load an index from its root id.
     pub async fn load(transaction: &'t Transaction, root_id: BlobId) -> Result<Self> {
-        let root = Self::fetch_branch_tx(transaction, &root_id).await?;
-
-        if let Some(local_key_size) = root.local_key_size() {
-            if local_key_size > Key::KEY_SIZE {
-                return Err(Error::CorruptedTree {
-                    path: BinaryTreePath::default(),
-                    err: format!(
-                        "root branch has an invalid local key size of {local_key_size} when at most {} was expected",
-                        Key::KEY_SIZE
-                    ),
-                });
-            }
-        }
+        let root = Self::fetch_root_tx(transaction, &root_id).await?;
 
         Ok(Self {
             _phantom: Default::default(),
             root,
-            root_id,
             transaction,
-            min_count: Self::DEFAULT_MIN_COUNT,
-            max_count: Self::DEFAULT_MAX_COUNT,
         })
     }
 
-    /// Clear the index.
+    /// Save the index.
+    pub async fn save(&self) -> Result<BlobId> {
+        let data = self.root.to_vec();
+
+        self.transaction
+            .store(data, &StoreOptions::default())
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Clear the index from all content.
+    ///
+    /// This keeps its current min and max count settings.
     pub async fn clear(&mut self) -> Result<()> {
-        // A new tree has no children and a local key size of exactly the full key size,=.
-        let root = TreeBranch::new(TreeMeta {
-            total_count: 0,
-            total_size: 0,
-        });
+        tracing::trace!("Clearing root.");
 
-        let root_id = self
-            .transaction
-            .store(root.to_vec(), &StoreOptions::default())
-            .await?;
+        if let Some(branch_id) = self.root.branch_id.take() {
+            self.transaction.unstore(&branch_id).await?;
+        }
 
-        self.set_root(root_id, root).await
+        Ok(())
     }
 
-    /// Get the root id for the index.
+    /// Set the balancing parameters on the tree.
     ///
-    /// This is typically used to persist the tree itself.
-    pub fn root_id(&self) -> &BlobId {
-        &self.root_id
-    }
+    /// This dictates the average amount of elements per layer of the tree.
+    ///
+    /// `min_count` indicates the minimum amount of child nodes that must exist on a given layer
+    /// when splitting (factorizing) the tree.
+    ///
+    /// `max_count` indicates the threshold over which a tree layer will be candidate for
+    /// balancing.
+    pub fn set_balancing_parameters(&mut self, min_count: u64, max_count: u64) -> Result<()> {
+        if min_count < 1 {
+            return Err(Error::InvalidParameter {
+                parameter: "min_count",
+                err: "must be at least 1".to_owned(),
+            });
+        }
 
-    /// Turn the index into its root blob id.
-    ///
-    /// This is typically used to persist the tree itself.
-    pub fn into_root_id(self) -> BlobId {
-        self.root_id
+        if min_count > max_count {
+            return Err(Error::InvalidParameter {
+                parameter: "min_count",
+                err: "must be greater than `max_count`".to_owned(),
+            });
+        }
+
+        self.root.min_count = min_count;
+        self.root.max_count = max_count;
+
+        Ok(())
     }
 
     /// Get a value from the index.
@@ -237,7 +256,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         let count_diff: u64;
         let size_diff: i128;
 
-        let (stack, mut new_root) = match self.search(key).await? {
+        let stack = match self.search(key).await? {
             TreeSearchResult::Found { stack } => {
                 let (stack, (mut branch, child_key)) = stack.pop_non_empty()?;
 
@@ -265,9 +284,12 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 // tree node blob id), we don't actually `unstore` it here as it is not our
                 // responsibility. After all, we don't `store` the provided `value` either.
 
-                (stack, branch)
+                stack
             }
-            TreeSearchResult::Missing { stack, next_key } => {
+            TreeSearchResult::Missing {
+                mut stack,
+                next_key,
+            } => {
                 // Set the parameters for the stack update.
                 // There was no such key, so no previous value to return.
                 count_diff = 1;
@@ -295,19 +317,19 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 // associated key, which is not what we want. So we pop it here and deal with
                 // it as a special case so that the rest of the stack unwinding can expect the
                 // child to always be there.
-                let (stack, (mut branch, child_key)) = stack.pop_non_empty()?;
+                if let Some((mut branch, child_key)) = stack.pop() {
+                    branch.meta.total_size += new_size;
+                    branch.meta.total_count += count_diff;
+                    branch.insert_non_existing(child_key, value);
 
-                branch.meta.total_size += new_size;
-                branch.meta.total_count += count_diff;
-                branch.insert_non_existing(child_key, value);
+                    let branch = self
+                        .factorize(branch, self.root.min_count, self.root.max_count, has_leafs)
+                        .await?;
 
-                let branch = self
-                    .factorize(branch, self.min_count, self.max_count, has_leafs)
-                    .await?;
+                    value = self.persist_branch(&branch).await?;
+                }
 
-                value = self.persist_branch(&branch).await?;
-
-                (stack, branch)
+                stack
             }
         };
 
@@ -322,14 +344,13 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             branch.meta.total_count += count_diff;
 
             let branch = self
-                .factorize(branch, self.min_count, self.max_count, false)
+                .factorize(branch, self.root.min_count, self.root.max_count, false)
                 .await?;
 
             value = self.persist_branch(&branch).await?;
-            new_root = branch;
         }
 
-        self.set_root(value, new_root).await?;
+        self.set_root_branch_id(Some(value)).await?;
 
         Ok(result)
     }
@@ -353,8 +374,6 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                     Some(self.persist_branch(&branch).await?)
                 };
 
-                let mut new_root = branch;
-
                 for (mut branch, child_key) in stack {
                     let old_value = if let Some(value) = value {
                         branch.replace_existing(&child_key, value)
@@ -364,27 +383,21 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
                     self.transaction.unstore(&old_value).await?;
 
-                    (value, branch) = if branch.children.is_empty() {
-                        (None, branch)
+                    value = if branch.children.is_empty() {
+                        None
                     } else {
                         branch.meta.total_size -= result.size();
                         branch.meta.total_count -= 1;
 
                         let branch = self
-                            .distribute(branch, self.min_count, self.max_count)
+                            .distribute(branch, self.root.min_count, self.root.max_count)
                             .await?;
 
-                        (Some(self.persist_branch(&branch).await?), branch)
+                        Some(self.persist_branch(&branch).await?)
                     };
-
-                    new_root = branch;
                 }
 
-                if let Some(value) = value {
-                    self.set_root(value, new_root).await?;
-                } else {
-                    self.clear().await?;
-                }
+                self.set_root_branch_id(value).await?;
 
                 Some(result)
             }
@@ -393,31 +406,39 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
     }
 
     /// Check if the index is empty.
-    pub fn is_empty(&self) -> bool {
-        self.root.meta.total_count == 0
+    pub async fn is_empty(&self) -> Result<bool> {
+        Ok(match &self.root.branch_id {
+            Some(branch_id) => self.fetch_branch(branch_id).await?.meta.total_count == 0,
+            None => true,
+        })
     }
 
     /// Get the count of items in the index.
     ///
     /// This size does not consider intermediate branches, just leaf nodes.
-    pub fn len(&self) -> u64 {
-        self.root.meta.total_count
+    pub async fn len(&self) -> Result<u64> {
+        Ok(match &self.root.branch_id {
+            Some(branch_id) => self.fetch_branch(branch_id).await?.meta.total_count,
+            None => 0,
+        })
     }
 
-    /// Get the total size of the items stored in the index.
+    /// Get the count of items in the index.
     ///
     /// This size does not consider intermediate branches, just leaf nodes.
-    pub fn total_size(&self) -> u64 {
-        self.root.meta.total_size
+    pub async fn total_size(&self) -> Result<u64> {
+        Ok(match &self.root.branch_id {
+            Some(branch_id) => self.fetch_branch(branch_id).await?.meta.total_size,
+            None => 0,
+        })
     }
 
-    async fn set_root(&mut self, root_id: BlobId, root: TreeBranch) -> Result<()> {
-        tracing::trace!("Updating root from {} to {root_id}.", self.root_id);
+    async fn set_root_branch_id(&mut self, branch_id: Option<BlobId>) -> Result<()> {
+        if let Some(branch_id) = &self.root.branch_id {
+            self.transaction.unstore(branch_id).await?;
+        }
 
-        self.transaction.unstore(&self.root_id).await?;
-
-        self.root_id = root_id;
-        self.root = root;
+        self.root.branch_id = branch_id;
 
         Ok(())
     }
@@ -431,11 +452,28 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             .expect("key size should convert to usize");
         assert_eq!(key.len(), expected_key_size);
 
-        let local_key_size = self.root.local_key_size().unwrap_or(Key::KEY_SIZE);
-        let (child_key, next_key) = Self::split_key(key, local_key_size);
-        let stack = TreeSearchStack::new(self.root.clone(), child_key);
+        match &self.root.branch_id {
+            Some(branch_id) => {
+                let branch = self.fetch_branch(branch_id).await?;
+                let local_key_size = match branch.local_key_size() {
+                    Some(local_key_size) => local_key_size,
+                    None => {
+                        return Err(Error::CorruptedTree {
+                            path: Default::default(),
+                            err: "root branch has no children".to_owned(),
+                        });
+                    }
+                };
+                let (child_key, next_key) = Self::split_key(key, local_key_size);
+                let stack = TreeSearchStack::new(branch, child_key);
 
-        self.search_from(stack, next_key).await
+                self.search_from(stack, next_key).await
+            }
+            None => Ok(crate::indexing::TreeSearchResult::Missing {
+                stack: Default::default(),
+                next_key: Some(BinaryTreePathElement(key)),
+            }),
+        }
     }
 
     fn search_from(
@@ -480,6 +518,15 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                     Ok(super::TreeSearchResult::Missing { stack, next_key })
                 }
             }
+        })
+    }
+
+    async fn fetch_root_tx(transaction: &Transaction, id: &BlobId) -> Result<TreeRoot> {
+        let data = transaction.retrieve_to_memory(id).await?;
+
+        TreeRoot::from_slice(&data).map_err(|err| Error::CorruptedTree {
+            path: BinaryTreePath::root(),
+            err: err.to_string(),
         })
     }
 
@@ -539,11 +586,11 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
     async fn factorize(
         &self,
         mut branch: TreeBranch,
-        min_count: usize,
-        max_count: usize,
+        min_count: u64,
+        max_count: u64,
         has_leafs: bool,
     ) -> Result<TreeBranch> {
-        if branch.children.len() <= max_count {
+        if branch.children.len() <= max_count.try_into().expect("can convert to usize") {
             return Ok(branch);
         }
         let local_key_size = match branch.local_key_size() {
@@ -579,7 +626,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
             // We don't need to check if we don't have to many buckets, because we start with the
             // smaller possible key size, and as a result, any future attempt will yield at least
             // as many buckets anyway.
-            if buckets.len() >= min_count {
+            if buckets.len() >= min_count.try_into().expect("can convert to usize") {
                 break;
             }
 
@@ -646,11 +693,11 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
     async fn distribute(
         &self,
         mut branch: TreeBranch,
-        min_count: usize,
-        max_count: usize,
+        min_count: u64,
+        max_count: u64,
     ) -> Result<TreeBranch> {
-        if branch.children.len() >= min_count
-            || branch.meta.total_count < max_count.try_into().expect("should convert to u64")
+        if branch.children.len() >= min_count.try_into().expect("can convert to usize")
+            || branch.meta.total_count < max_count
         {
             return Ok(branch);
         }
@@ -696,7 +743,7 @@ mod tests {
 
         assert_transaction_empty!(tx);
 
-        let initial_root_id = index.root_id().clone();
+        let initial_root_id = index.save().await.unwrap();
 
         assert_empty!(index);
         assert_total_size!(index, 0);
@@ -769,7 +816,7 @@ mod tests {
 
         assert_transaction_empty!(tx);
 
-        let final_root_id = index.root_id().clone();
+        let final_root_id = index.save().await.unwrap();
         assert_eq!(initial_root_id, final_root_id);
     }
 
@@ -783,8 +830,7 @@ mod tests {
 
         let mut index = FixedSizeIndex::<'_, u64>::initialize(&tx).await.unwrap();
 
-        index.min_count = 4;
-        index.max_count = 256; // This will force a factorization for each byte of the key.
+        index.set_balancing_parameters(4, 256).unwrap();
 
         assert_transaction_empty!(tx);
 

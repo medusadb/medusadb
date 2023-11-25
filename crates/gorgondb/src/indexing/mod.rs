@@ -12,6 +12,13 @@ pub use tree::{
 /// An error type.
 #[derive(Debug, thiserror::Error)]
 pub enum Error<KeyElem> {
+    /// An invalid parameter was specified.
+    #[error("invalid parameter `{parameter}`: {err}")]
+    InvalidParameter {
+        parameter: &'static str,
+        err: String,
+    },
+
     /// An error happened at the transaction level.
     #[error("transaction: {0}")]
     TransactionError(#[from] crate::gorgon::Error),
@@ -36,8 +43,8 @@ pub(super) mod tests {
         ($index:ident) => {
             tracing::debug!("assert_empty()");
 
-            assert!($index.is_empty());
-            assert_eq!($index.len(), 0);
+            assert!($index.is_empty().await.unwrap());
+            assert_eq!($index.len().await.unwrap(), 0);
         };
     }
 
@@ -45,7 +52,7 @@ pub(super) mod tests {
         ($index:ident, $len:expr) => {
             tracing::debug!("assert_len({})", $len);
 
-            assert_eq!($index.len(), $len);
+            assert_eq!($index.len().await.unwrap(), $len);
         };
     }
 
@@ -53,7 +60,7 @@ pub(super) mod tests {
         ($index:ident, $total_size:expr) => {
             tracing::debug!("assert_total_size({})", $total_size);
 
-            assert_eq!($index.total_size(), $total_size);
+            assert_eq!($index.total_size().await.unwrap(), $total_size);
         };
     }
 

@@ -425,7 +425,7 @@ pub enum TreeSearchResult<KeyElem, Meta> {
         stack: TreeSearchStack<KeyElem, Meta>,
     },
     Missing {
-        /// The stack that led to the found entry.
+        /// The stack up to the missing entry.
         stack: TreeSearchStack<KeyElem, Meta>,
 
         /// The next key, if there is one.
