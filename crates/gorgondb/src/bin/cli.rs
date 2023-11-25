@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use aws_config::BehaviorVersion;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use gorgondb::{
@@ -95,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
 
     match args.command {
         Command::Raw { command } => {
-            let sdk_config = aws_config::load_from_env().await;
+            let sdk_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
             let mut storage: Storage = AwsStorage::new(
                 &sdk_config,
                 std::env::var("GORGONDB_AWS_S3_BUCKET_NAME")?,
