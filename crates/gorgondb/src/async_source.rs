@@ -153,6 +153,12 @@ impl<'d> AsyncSource<'d> {
     }
 }
 
+impl From<&'static str> for AsyncSource<'static> {
+    fn from(value: &'static str) -> Self {
+        Self::Static(value.as_bytes())
+    }
+}
+
 impl<'d> From<Cow<'d, [u8]>> for AsyncSource<'d> {
     fn from(value: Cow<'d, [u8]>) -> Self {
         Self::Memory(value)

@@ -93,7 +93,7 @@ impl Gorgon {
 
     /// Retrieve a value from the specified storage and read it in memory.
     ///
-    /// This is a convenience method that will use the most efficient method to store the value.
+    /// This is a convenience method that will use the most efficient method to read the value.
     pub async fn retrieve_to_memory_from<'s>(
         &'s self,
         storage: &'s (impl Retrieve + Sync),

@@ -2,8 +2,12 @@
 
 use std::path::PathBuf;
 
+use chrono::Utc;
 use clap::{Parser, Subcommand};
-use gorgondb::{gorgon::StoreOptions, storage::AwsStorage, BlobId, Filesystem, Storage};
+use gorgondb::{
+    gorgon::StoreOptions, indexing::FixedSizeIndex, storage::AwsStorage, BlobId, Client,
+    Filesystem, Storage,
+};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -14,6 +18,23 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run raw commands.
+    Raw {
+        /// The test command to execute.
+        #[command(subcommand)]
+        command: RawCommand,
+    },
+
+    /// Run tests.
+    Test {
+        /// The test command to execute.
+        #[command(subcommand)]
+        command: TestCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RawCommand {
     /// Store a value and displays its blob id.
     Store {
         /// The path of the file to store.
@@ -30,6 +51,34 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum TestCommand {
+    /// Test indexing of a lot of values.
+    Indexing {
+        /// The test command to execute.
+        #[command(subcommand)]
+        command: TestIndexingCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum TestIndexingCommand {
+    /// Test indexing of a lot of values.
+    FixedSize {
+        /// The count of keys to insert.
+        #[clap(long, default_value_t = 16384)]
+        count: u64,
+
+        /// The minimum count used for balancing.
+        #[clap(long, default_value_t = 4)]
+        min_count: u64,
+
+        /// The maximum count used for balancing.
+        #[clap(long, default_value_t = 256)]
+        max_count: u64,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -42,34 +91,88 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let sdk_config = aws_config::load_from_env().await;
     let filesystem = Filesystem::default();
-    let mut storage: Storage = AwsStorage::new(
-        &sdk_config,
-        std::env::var("GORGONDB_AWS_S3_BUCKET_NAME").unwrap(),
-        std::env::var("GORGONDB_AWS_DYNAMODB_TABLE_NAME").unwrap(),
-    )
-    .into();
-
-    //let storage = Storage::Filesystem(filesystem.new_storage("test")?);
-
-    storage
-        .cache_mut()
-        .set_filesystem_storage(Some(filesystem.new_caching_storage("gorgoncli")?));
-
-    let gorgon = gorgondb::Client::new(storage);
 
     match args.command {
-        Command::Store { path } => {
-            let options = &StoreOptions::default();
+        Command::Raw { command } => {
+            let sdk_config = aws_config::load_from_env().await;
+            let mut storage: Storage = AwsStorage::new(
+                &sdk_config,
+                std::env::var("GORGONDB_AWS_S3_BUCKET_NAME")?,
+                std::env::var("GORGONDB_AWS_DYNAMODB_TABLE_NAME")?,
+            )
+            .into();
 
-            let blob_id = gorgon.store_from_file(path, options).await?;
+            storage
+                .cache_mut()
+                .set_filesystem_storage(Some(filesystem.new_caching_storage("gorgoncli")?));
 
-            println!("{blob_id}");
+            let client = gorgondb::Client::new(storage);
+
+            match command {
+                RawCommand::Store { path } => {
+                    let options = &StoreOptions::default();
+
+                    let blob_id = client.store_from_file(path, options).await?;
+
+                    println!("{blob_id}");
+                }
+                RawCommand::Retrieve { blob_id, path } => {
+                    client.retrieve_to_file(&blob_id, path).await?;
+                }
+            }
         }
-        Command::Retrieve { blob_id, path } => {
-            gorgon.retrieve_to_file(&blob_id, path).await?;
-        }
+        Command::Test { command } => match command {
+            TestCommand::Indexing { command } => match command {
+                TestIndexingCommand::FixedSize {
+                    count,
+                    min_count,
+                    max_count,
+                } => {
+                    let storage = filesystem.new_storage("test")?;
+                    let client = Client::new(storage);
+                    let before = Utc::now();
+
+                    let blob_id = client
+                        .store(
+                            "this is a rather large value that is self-contained",
+                            &StoreOptions::default(),
+                        )
+                        .await?;
+                    let blob_id2 = client
+                        .store(
+                            "this is a new large value that is self-contained",
+                            &StoreOptions::default(),
+                        )
+                        .await?;
+
+                    let tx = client.start_transaction()?;
+
+                    let mut index = FixedSizeIndex::<'_, u64>::initialize(&tx).await?;
+
+                    index.set_balancing_parameters(min_count, max_count)?;
+
+                    // Insert 1024 values in the tree to trigger actual transaction writing as well as
+                    // rebalancing.
+                    for i in 0..count {
+                        index.insert(&i, blob_id.clone()).await?;
+                    }
+
+                    for i in 0..count {
+                        index.insert(&i, blob_id2.clone()).await?;
+                    }
+
+                    for i in 0..count {
+                        index.remove(&i).await?;
+                    }
+
+                    let after = Utc::now();
+                    let duration = after - before;
+
+                    println!("Execution took {}ms", duration.num_milliseconds());
+                }
+            },
+        },
     }
 
     Ok(())
