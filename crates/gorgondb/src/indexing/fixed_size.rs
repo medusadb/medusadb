@@ -2,6 +2,7 @@ use std::{
     marker::PhantomData,
     mem::size_of,
     num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
 };
 
 use byteorder::ByteOrder;
@@ -156,7 +157,7 @@ pub struct FixedSizeIndex<'t, Key> {
     _phantom: PhantomData<Key>,
     root: TreeRoot,
     transaction: &'t Transaction,
-    cache: Cache<TreeBranch>,
+    cache: Cache<Arc<TreeBranch>>,
 }
 
 impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
@@ -242,13 +243,9 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
     /// Get a value from the index.
     pub async fn get(&self, key: &Key) -> Result<Option<BlobId>> {
         Ok(match self.search(key).await? {
-            TreeSearchResult::Found { mut stack } => Some(
-                stack
-                    .top_occupied_entry_mut()
-                    .expect("entry should be occupied")
-                    .value()
-                    .clone(),
-            ),
+            TreeSearchResult::Found { stack } => {
+                Some(stack.top_value().expect("entry should be occupied").clone())
+            }
             TreeSearchResult::Missing { .. } => None,
         })
     }
@@ -265,8 +262,9 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
         let stack = match self.search(key).await? {
             TreeSearchResult::Found { stack } => {
-                let (stack, (mut branch, child_key)) = stack.pop_non_empty()?;
+                let (stack, (branch, child_key)) = stack.pop_non_empty()?;
 
+                let mut branch = Arc::try_unwrap(branch).unwrap_or_else(|branch| (*branch).clone());
                 let mut entry = branch.occupied_entry(&child_key);
                 let old_value = entry.value();
 
@@ -324,7 +322,9 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 // associated key, which is not what we want. So we pop it here and deal with
                 // it as a special case so that the rest of the stack unwinding can expect the
                 // child to always be there.
-                if let Some((mut branch, child_key)) = stack.pop() {
+                if let Some((branch, child_key)) = stack.pop() {
+                    let mut branch =
+                        Arc::try_unwrap(branch).unwrap_or_else(|branch| (*branch).clone());
                     branch.meta.total_size += new_size;
                     branch.meta.total_count += count_diff;
                     branch.insert_non_existing(child_key, value);
@@ -343,7 +343,8 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         // At this point, if we have stack, its top value has a child node at `child_key` that
         // needs to be either inserted or updated with the value in `value`.
 
-        for (mut branch, child_key) in stack {
+        for (branch, child_key) in stack {
+            let mut branch = Arc::try_unwrap(branch).unwrap_or_else(|branch| (*branch).clone());
             let old_value = branch.replace_existing(&child_key, value);
 
             self.transaction.unstore(&old_value).await?;
@@ -368,8 +369,9 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
     pub async fn remove(&mut self, key: &Key) -> Result<Option<BlobId>> {
         Ok(match self.search(key).await? {
             TreeSearchResult::Found { stack } => {
-                let (stack, (mut branch, child_key)) = stack.pop_non_empty()?;
+                let (stack, (branch, child_key)) = stack.pop_non_empty()?;
 
+                let mut branch = Arc::try_unwrap(branch).unwrap_or_else(|branch| (*branch).clone());
                 let result = branch.occupied_entry(&child_key).remove();
 
                 let mut value = if branch.children.is_empty() {
@@ -381,7 +383,9 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                     Some(self.persist_branch(branch).await?)
                 };
 
-                for (mut branch, child_key) in stack {
+                for (branch, child_key) in stack {
+                    let mut branch =
+                        Arc::try_unwrap(branch).unwrap_or_else(|branch| (*branch).clone());
                     let old_value = if let Some(value) = value {
                         branch.replace_existing(&child_key, value)
                     } else {
@@ -489,13 +493,12 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         next_key: Option<Bytes>,
     ) -> BoxFuture<'_, Result<TreeSearchResult>> {
         Box::pin(async move {
-            match stack.top_occupied_entry_mut() {
-                Some(entry) => {
+            match stack.top_value() {
+                Some(id) => {
                     match next_key {
                         // If we have no next key, it means we found the value.
                         None => Ok(TreeSearchResult::Found { stack }),
                         Some(next_key) => {
-                            let id = entry.value();
                             let branch = self.fetch_branch(id).await?;
                             let local_key_size = match branch.local_key_size() {
                                 Some(local_key_size) => local_key_size,
@@ -546,14 +549,17 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         })
     }
 
-    async fn fetch_branch(&self, id: &BlobId) -> Result<TreeBranch> {
+    async fn fetch_branch(&self, id: &BlobId) -> Result<Arc<TreeBranch>> {
         match self.cache.get(id) {
             Some(branch) => Ok(branch.clone()),
-            None => Self::fetch_branch_tx(self.transaction, id).await,
+            None => Self::fetch_branch_tx(self.transaction, id)
+                .await
+                .map(Arc::new),
         }
     }
 
-    async fn persist_branch(&mut self, branch: TreeBranch) -> Result<BlobId> {
+    async fn persist_branch(&mut self, branch: impl Into<Arc<TreeBranch>>) -> Result<BlobId> {
+        let branch = branch.into();
         let data = branch.to_vec();
 
         let blob_id = self
@@ -723,9 +729,9 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
             children.reserve(sub_branch.children.len());
 
-            for TreeItem(sub_key, blob_id) in sub_branch.children {
-                let new_key = Self::join_key(key.clone(), sub_key);
-                children.push(TreeItem(new_key, blob_id));
+            for TreeItem(sub_key, blob_id) in &sub_branch.children {
+                let new_key = Self::join_key(key.clone(), sub_key.clone());
+                children.push(TreeItem(new_key, blob_id.clone()));
             }
 
             self.transaction.unstore(blob_id).await?;

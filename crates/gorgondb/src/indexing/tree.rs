@@ -1,6 +1,6 @@
 //! Tree-type structure for indexes.
 
-use std::{fmt::Display, num::NonZeroU64};
+use std::{fmt::Display, num::NonZeroU64, sync::Arc};
 
 use bytes::Bytes;
 use itertools::Itertools;
@@ -66,6 +66,14 @@ impl<KeyElem: Ord, Meta> TreeBranch<KeyElem, Meta> {
         }
     }
 
+    /// Find the occupied entry for the children with the specified key.
+    pub(crate) fn get(&self, key: &KeyElem) -> Option<&TreeItem<KeyElem>> {
+        self.children
+            .binary_search_by(|item| item.0.cmp(key))
+            .ok()
+            .and_then(|idx| self.children.get(idx))
+    }
+
     /// Find the entry for the children with the specified key.
     pub fn entry(&mut self, key: KeyElem) -> TreeBranchEntry<'_, KeyElem, Meta> {
         match self.children.binary_search_by(|item| item.0.cmp(&key)) {
@@ -86,17 +94,6 @@ impl<KeyElem: Ord, Meta> TreeBranch<KeyElem, Meta> {
             .expect("the entry should exist");
 
         TreeBranchOccupiedEntry { branch: self, idx }
-    }
-
-    /// Find the occupied entry for the children with the specified key.
-    fn as_occupied_entry(
-        &mut self,
-        key: &KeyElem,
-    ) -> Option<TreeBranchOccupiedEntry<'_, KeyElem, Meta>> {
-        match self.children.binary_search_by(|item| item.0.cmp(key)) {
-            Ok(idx) => Some(TreeBranchOccupiedEntry { branch: self, idx }),
-            Err(_) => None,
-        }
     }
 
     /// Replace a child into the branch, that is guaranteed to already be present.
@@ -316,7 +313,7 @@ impl BinaryTreePathElement {
 
 /// A search stack.
 #[derive(Debug, Clone)]
-pub struct TreeSearchStack<KeyElem, Meta>(Vec<(TreeBranch<KeyElem, Meta>, KeyElem)>);
+pub struct TreeSearchStack<KeyElem, Meta>(Vec<(Arc<TreeBranch<KeyElem, Meta>>, KeyElem)>);
 
 impl<KeyElem, Meta> Default for TreeSearchStack<KeyElem, Meta> {
     fn default() -> Self {
@@ -326,18 +323,18 @@ impl<KeyElem, Meta> Default for TreeSearchStack<KeyElem, Meta> {
 
 /// A search stack result.
 pub type TreeSearchStackResult<T, KeyElem> = Result<T, Error<KeyElem>>;
-pub type TreeSearchStackItem<KeyElem, Meta> = (TreeBranch<KeyElem, Meta>, KeyElem);
+pub type TreeSearchStackItem<KeyElem, Meta> = (Arc<TreeBranch<KeyElem, Meta>>, KeyElem);
 
 impl<KeyElem, Meta> TreeSearchStack<KeyElem, Meta> {
     /// Instantiate a new stack starting from the specified node.
-    pub fn new(root: TreeBranch<KeyElem, Meta>, child_key: KeyElem) -> Self {
+    pub fn new(root: Arc<TreeBranch<KeyElem, Meta>>, child_key: KeyElem) -> Self {
         Self(vec![(root, child_key)])
     }
 
     /// Push a new item to the stack.
     pub fn push(
         &mut self,
-        branch: TreeBranch<KeyElem, Meta>,
+        branch: Arc<TreeBranch<KeyElem, Meta>>,
         elem: impl Into<KeyElem>,
     ) -> &mut Self {
         self.0.push((branch, elem.into()));
@@ -379,10 +376,10 @@ impl<KeyElem, Meta> Iterator for TreeSearchStack<KeyElem, Meta> {
 
 impl<KeyElem: Ord, Meta> TreeSearchStack<KeyElem, Meta> {
     /// Get the top occupied entry.
-    pub fn top_occupied_entry_mut(&mut self) -> Option<TreeBranchOccupiedEntry<'_, KeyElem, Meta>> {
-        match self.0.last_mut() {
+    pub fn top_value(&self) -> Option<&BlobId> {
+        match self.0.last() {
             None => None,
-            Some(top) => top.0.as_occupied_entry(&top.1),
+            Some(top) => top.0.get(&top.1).map(|item| &item.1),
         }
     }
 }
