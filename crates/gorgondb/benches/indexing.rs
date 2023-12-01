@@ -28,7 +28,7 @@ async fn fixed_size_index() {
     }
 }
 
-fn criterion_benchmark(c: &mut Criterion) {
+fn criterion_indexes(c: &mut Criterion) {
     let tokio_rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -42,6 +42,6 @@ fn criterion_benchmark(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().measurement_time(Duration::from_secs(20));
-    targets = criterion_benchmark
+    targets = criterion_indexes
 }
 criterion_main!(benches);

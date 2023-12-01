@@ -67,3 +67,7 @@ criterion.workspace = true
 [[bench]]
 name = "indexing"
 harness = false
+
+[[bench]]
+name = "perf"
+harness = false
