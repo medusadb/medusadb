@@ -134,12 +134,15 @@ struct TreeRoot {
     max_count: u64,
 }
 
-impl Default for TreeRoot {
-    fn default() -> Self {
+impl TreeRoot {
+    fn new_for_max_tree_size(max_tree_size: u64, key_size: u64) -> Self {
+        let max_count = max_tree_size / (key_size + 64);
+        let min_count = max_count / 2;
+
         Self {
             branch_id: None,
-            min_count: 256,
-            max_count: 1024,
+            min_count,
+            max_count,
         }
     }
 }
@@ -159,8 +162,9 @@ pub struct FixedSizeIndex<'t, Key> {
 impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
     /// Instantiate a new, empty, index.
     pub async fn initialize(transaction: &'t Transaction) -> Result<Self> {
-        // A new tree has no children and a local key size of exactly the full key size,=.
-        let root = TreeRoot::default();
+        // Let's set a max tree size of 200KB, which is a good default for AWS DynamoDB.
+        let max_tree_size = 200 * 1024;
+        let root = TreeRoot::new_for_max_tree_size(max_tree_size, Key::KEY_SIZE.get());
 
         Ok(Self {
             _phantom: Default::default(),
