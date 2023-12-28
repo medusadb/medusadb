@@ -31,12 +31,12 @@ chrono = "0.4.31"
 clap = {version = "4", features = ["derive"]}
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 dirs = "5"
-fastcdc = {version = "3.1", features = ["futures"]}
+fastcdc = {version = "3", features = ["futures"]}
 futures = "0.3.28"
 fs4 = { version = "0.6", features = ["tokio-async"] }
 hex = "0.4.3"
 http = "0.2.9"
-humansize = {version = "2.1.3", features = ["impl_style"]}
+humansize = {version = "2", features = ["impl_style"]}
 lru = "0.12.1"
 itertools = "0.11.0"
 num-integer = {version = "0.1.45", features = ["default", "i128"]}
