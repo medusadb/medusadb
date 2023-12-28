@@ -7,7 +7,7 @@ mod tree;
 pub(crate) use cache::Cache;
 pub use fixed_size::{FixedSizeIndex, FixedSizeKey};
 pub use tree::{
-    BinaryTreePath, BinaryTreePathElement, TreeBranch, TreePath, TreeSearchResult, TreeSearchStack,
+    BinaryTreePathElement, TreeBranch, TreeDiff, TreePath, TreeSearchResult, TreeSearchStack,
 };
 
 /// An error type.

@@ -27,6 +27,7 @@ cli = ["dep:anyhow", "dep:clap", "dep:tracing-subscriber"]
 anyhow = { workspace = true, optional = true }
 async-compat.workspace = true
 async-trait.workspace = true
+async-stream.workspace = true
 aws-config.workspace = true
 aws-sdk-s3 = { workspace = true, optional = true }
 aws-sdk-dynamodb = { workspace = true, optional = true }

@@ -30,7 +30,6 @@ pub trait ByteDeserialize: for<'a> Deserialize<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeBranch<KeyElem, Meta> {
     pub(crate) meta: Meta,
-
     pub(crate) children: Vec<TreeItem<KeyElem>>,
 }
 
@@ -47,6 +46,7 @@ impl<KeyElem: DeserializeOwned, Meta: DeserializeOwned> ByteDeserialize
     for TreeBranch<KeyElem, Meta>
 {
 }
+
 impl<KeyElem: Serialize, Meta: Serialize> ByteSerialize for TreeBranch<KeyElem, Meta> {}
 
 impl<KeyElem: Ord, Meta> TreeBranch<KeyElem, Meta> {
@@ -185,18 +185,21 @@ impl<'b, KeyElem, Meta> TreeBranchVacantEntry<'b, KeyElem, Meta> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TreeItem<KeyElem>(pub(crate) KeyElem, pub(crate) BlobId);
 
+/// A trait for key elements that have a size.
+pub trait SizedKeyElement {
+    /// Get the size of the key element, in bytes.
+    fn size(&self) -> NonZeroU64;
+}
+
 /// A path in a tree.
 #[derive(Debug, Clone)]
-pub struct TreePath<Key>(Vec<Key>);
+pub struct TreePath<KeyElem>(Vec<KeyElem>);
 
 impl<T> Default for TreePath<T> {
     fn default() -> Self {
         Self(Default::default())
     }
 }
-
-/// An alias for a binary tree path.
-pub type BinaryTreePath = TreePath<BinaryTreePathElement>;
 
 impl<KeyElem: Display> Display for TreePath<KeyElem> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -219,6 +222,21 @@ impl<KeyElem> TreePath<KeyElem> {
     /// Push a new element to the path.
     pub fn push(&mut self, path: impl Into<KeyElem>) {
         self.0.push(path.into());
+    }
+
+    /// Pop the last element from the path, if there is one, and returns it.
+    pub fn pop(&mut self) -> Option<KeyElem> {
+        self.0.pop()
+    }
+}
+
+impl<KeyElem: SizedKeyElement> TreePath<KeyElem> {
+    pub fn size(&self) -> u64 {
+        self.0
+            .iter()
+            .map(|item| item.size().get())
+            .reduce(|acc, v| acc + v)
+            .unwrap_or_default()
     }
 }
 
@@ -298,9 +316,9 @@ impl From<BinaryTreePathElement> for Bytes {
     }
 }
 
-impl BinaryTreePathElement {
+impl SizedKeyElement for BinaryTreePathElement {
     /// Get the size of the binary tree path element.
-    pub fn size(&self) -> NonZeroU64 {
+    fn size(&self) -> NonZeroU64 {
         NonZeroU64::new(
             self.0
                 .len()
@@ -405,5 +423,19 @@ pub enum TreeSearchResult<KeyElem, Meta> {
 
         /// The next key, if there is one.
         next_key: Option<KeyElem>,
+    },
+}
+
+/// Represents a tree difference.
+pub enum TreeDiff<Key> {
+    /// The key is only present on the left tree.
+    LeftOnly { key: Key, value: BlobId },
+    /// The key is only present on the right tree.
+    RightOnly { key: Key, value: BlobId },
+    /// The key exists in both trees with a different value.
+    Diff {
+        key: Key,
+        left: BlobId,
+        right: BlobId,
     },
 }

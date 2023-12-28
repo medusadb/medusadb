@@ -7,6 +7,9 @@ version = "0.8"
 [imports.bytecode-alliance]
 url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml"
 
+[imports.google]
+url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
+
 [imports.isrg]
 url = "https://raw.githubusercontent.com/divviup/libprio-rs/main/supply-chain/audits.toml"
 
@@ -151,10 +154,6 @@ criteria = "safe-to-run"
 version = "0.5.0"
 criteria = "safe-to-run"
 
-[[exemptions.crossbeam-deque]]
-version = "0.8.3"
-criteria = "safe-to-run"
-
 [[exemptions.crossbeam-epoch]]
 version = "0.9.17"
 criteria = "safe-to-run"
@@ -221,10 +220,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.fastcdc]]
 version = "3.1.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.fastrand]]
-version = "2.0.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.ff]]
@@ -327,10 +322,6 @@ criteria = "safe-to-deploy"
 version = "1.8.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.httpdate]]
-version = "1.0.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.humansize]]
 version = "2.1.3"
 criteria = "safe-to-deploy"
@@ -366,10 +357,6 @@ criteria = "safe-to-deploy"
 [[exemptions.indexmap]]
 version = "2.1.0"
 criteria = "safe-to-deploy"
-
-[[exemptions.itertools]]
-version = "0.10.5"
-criteria = "safe-to-run"
 
 [[exemptions.itertools]]
 version = "0.11.0"
@@ -453,10 +440,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.pin-project-internal]]
 version = "1.1.3"
-criteria = "safe-to-deploy"
-
-[[exemptions.pin-project-lite]]
-version = "0.2.13"
 criteria = "safe-to-deploy"
 
 [[exemptions.pkcs8]]
@@ -635,10 +618,6 @@ criteria = "safe-to-deploy"
 version = "0.24.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.tokio-stream]]
-version = "0.1.14"
-criteria = "safe-to-deploy"
-
 [[exemptions.tokio-util]]
 version = "0.7.10"
 criteria = "safe-to-deploy"
@@ -695,20 +674,12 @@ criteria = "safe-to-deploy"
 version = "2.1.3"
 criteria = "safe-to-deploy"
 
-[[exemptions.utf8parse]]
-version = "0.2.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.uuid]]
 version = "1.6.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.valuable]]
 version = "0.1.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.version_check]]
-version = "0.9.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.vsimd]]

@@ -1,4 +1,6 @@
+use async_stream::try_stream;
 use std::{
+    collections::VecDeque,
     marker::PhantomData,
     mem::size_of,
     num::{NonZeroU64, NonZeroUsize},
@@ -6,21 +8,22 @@ use std::{
 };
 
 use byteorder::ByteOrder;
-use bytes::Bytes;
-use futures::future::BoxFuture;
+use bytes::{Bytes, BytesMut};
+use futures::{future::BoxFuture, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::{gorgon::StoreOptions, BlobId, Transaction};
 
 use super::{
     tree::{ByteDeserialize, ByteSerialize, TreeItem},
-    BinaryTreePath, BinaryTreePathElement, Cache, Error,
+    BinaryTreePathElement, Cache, Error,
 };
 
 /// A trait for types that can be used as a fixed-size key.
 pub trait FixedSizeKey: Sized + Ord + Eq {
     /// The size of the key.
-    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(size_of::<Self>() as u64) };
+    const KEY_USIZE: usize = size_of::<Self>();
+    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(Self::KEY_USIZE as u64) };
 
     /// Make a zero-buffer of the appropriate size to store a serialized version of keys of this
     /// type.
@@ -36,20 +39,31 @@ pub trait FixedSizeKey: Sized + Ord + Eq {
 
     /// Convert the value into a slice of bytes.
     fn to_bytes(&self) -> Bytes;
+
+    /// Build an instance from bytes.
+    ///
+    /// The passed-in value must be exactly `KEY_SIZE` bytes long or the call will panic.
+    fn from_slice(buf: &[u8]) -> Self;
 }
 
 impl FixedSizeKey for u8 {
     /// The size of the key.
-    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(size_of::<Self>() as u64) };
+    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(Self::KEY_USIZE as u64) };
 
     fn to_bytes(&self) -> Bytes {
         vec![*self].into()
+    }
+
+    fn from_slice(buf: &[u8]) -> Self {
+        assert_eq!(buf.len(), size_of::<Self>());
+
+        buf[0]
     }
 }
 
 impl FixedSizeKey for u16 {
     /// The size of the key.
-    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(size_of::<Self>() as u64) };
+    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(Self::KEY_USIZE as u64) };
 
     fn to_bytes(&self) -> Bytes {
         let mut buf = Self::make_buf();
@@ -57,11 +71,15 @@ impl FixedSizeKey for u16 {
 
         buf.into()
     }
+
+    fn from_slice(buf: &[u8]) -> Self {
+        byteorder::NetworkEndian::read_u16(buf)
+    }
 }
 
 impl FixedSizeKey for u32 {
     /// The size of the key.
-    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(size_of::<Self>() as u64) };
+    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(Self::KEY_USIZE as u64) };
 
     fn to_bytes(&self) -> Bytes {
         let mut buf = Self::make_buf();
@@ -69,11 +87,15 @@ impl FixedSizeKey for u32 {
 
         buf.into()
     }
+
+    fn from_slice(buf: &[u8]) -> Self {
+        byteorder::NetworkEndian::read_u32(buf)
+    }
 }
 
 impl FixedSizeKey for u64 {
     /// The size of the key.
-    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(size_of::<Self>() as u64) };
+    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(Self::KEY_USIZE as u64) };
 
     fn to_bytes(&self) -> Bytes {
         let mut buf = Self::make_buf();
@@ -81,11 +103,15 @@ impl FixedSizeKey for u64 {
 
         buf.into()
     }
+
+    fn from_slice(buf: &[u8]) -> Self {
+        byteorder::NetworkEndian::read_u64(buf)
+    }
 }
 
 impl FixedSizeKey for u128 {
     /// The size of the key.
-    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(size_of::<Self>() as u64) };
+    const KEY_SIZE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(Self::KEY_USIZE as u64) };
 
     fn to_bytes(&self) -> Bytes {
         let mut buf = Self::make_buf();
@@ -93,9 +119,14 @@ impl FixedSizeKey for u128 {
 
         buf.into()
     }
+
+    fn from_slice(buf: &[u8]) -> Self {
+        byteorder::NetworkEndian::read_u128(buf)
+    }
 }
 
 type Result<T, E = Error<BinaryTreePathElement>> = std::result::Result<T, E>;
+type TreePath = super::TreePath<BinaryTreePathElement>;
 type TreeBranch = super::TreeBranch<BinaryTreePathElement, TreeMeta>;
 type TreeSearchStack = super::TreeSearchStack<BinaryTreePathElement, TreeMeta>;
 type TreeSearchResult = super::TreeSearchResult<BinaryTreePathElement, TreeMeta>;
@@ -535,7 +566,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         let data = transaction.retrieve_to_memory(id).await?;
 
         TreeRoot::from_slice(&data).map_err(|err| Error::CorruptedTree {
-            path: BinaryTreePath::root(),
+            path: Default::default(),
             err: err.to_string(),
         })
     }
@@ -544,7 +575,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         let data = transaction.retrieve_to_memory(id).await?;
 
         TreeBranch::from_slice(&data).map_err(|err| Error::CorruptedTree {
-            path: BinaryTreePath::root(),
+            path: Default::default(),
             err: err.to_string(),
         })
     }
@@ -643,7 +674,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
             // If we have enough different buckets, use that.
             //
-            // We don't need to check if we don't have to many buckets, because we start with the
+            // We don't need to check if we don't have too many buckets, because we start with the
             // smaller possible key size, and as a result, any future attempt will yield at least
             // as many buckets anyway.
             if buckets.len() >= min_count.try_into().expect("can convert to usize") {
@@ -741,11 +772,93 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
         self.factorize(branch, min_count, max_count, false).await
     }
+
+    /// Scan all the values in the tree.
+    ///
+    /// # Warning
+    ///
+    /// Calling this method on a big tree will take a huge amount of time and iterations. Don't use
+    /// this to search for values. It's almost never what you want.
+    pub fn scan(&self) -> impl Stream<Item = Result<(Key, BlobId)>> + '_ {
+        try_stream! {
+            if let Some(branch_id) = &self.root.branch_id {
+                let branch = self.fetch_branch(branch_id).await?;
+                let key_prefix_path = TreePath::default();
+                let key_prefix = BytesMut::new();
+                let stream = self.scan_branch(key_prefix_path, key_prefix, branch);
+
+                tokio::pin!(stream);
+
+                while let Some(item) = stream.next().await {
+                    yield item?;
+                }
+            }
+        }
+    }
+
+    fn scan_branch(
+        &self,
+        key_prefix_path: TreePath,
+        key_prefix: BytesMut,
+        branch: Arc<TreeBranch>,
+    ) -> impl Stream<Item = Result<(Key, BlobId)>> + '_ {
+        let mut stack = VecDeque::new();
+
+        stack.push_back((key_prefix_path, key_prefix, branch));
+
+        try_stream! {
+            while let Some((mut key_prefix_path, mut key_prefix, branch)) = stack.pop_front() {
+                let local_key_size: usize = branch.local_key_size().ok_or_else(|| Error::CorruptedTree{
+                    path: key_prefix_path.clone(),
+                    err: "tree branch has no children".to_owned(),
+                })?.get().try_into().expect("local key size should fit a usize");
+
+                let key_prefix_size = key_prefix.len();
+                let key_size = key_prefix_size + local_key_size;
+
+                // If we have reached leaves...
+                if key_size == Key::KEY_USIZE {
+                    for TreeItem(key_elem, blob_id) in &branch.children {
+                        key_prefix.extend_from_slice(&key_elem.0);
+                        yield (Key::from_slice(&key_prefix), blob_id.clone());
+                        key_prefix.truncate(key_prefix_size);
+                    }
+                } else {
+                    for TreeItem(key_elem, blob_id) in &branch.children {
+                        let branch = self.fetch_branch(blob_id).await?;
+                        key_prefix.extend_from_slice(&key_elem.0);
+                        key_prefix_path.push(key_elem.clone());
+
+                        stack.push_back((key_prefix_path.clone(), key_prefix.clone(), branch));
+
+                        key_prefix.truncate(key_prefix_size);
+                        key_prefix_path.pop();
+                    }
+                }
+            }
+        }
+    }
+
+    // /// Compute the difference between two trees.
+    // ///
+    // /// # Warning
+    // ///
+    // /// This method attempts to be as efficient as possible, but calling it on two widely
+    // /// different big trees will take a huge amount of time and iterations.
+    // ///
+    // /// It should almost only be called on trees that you know have very little differences.
+    // fn diff(
+    //     &self,
+    //     other: &TreeRoot,
+    // ) -> Result<impl TryStream<Ok = TreeDiff<Key>, Error = Error<BinaryTreePathElement>>> {
+    //     unimplemented!()
+    // }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::Client;
+    use futures::TryStreamExt;
     use tracing_test::traced_test;
 
     use super::super::tests::*;
@@ -923,6 +1036,45 @@ mod tests {
                 0x0E, 0x0F, 0x10, 0xA8, 0x41, 0x32, 0x5A, 0x76, 0x62, 0x77, 0x3D, 0x3D
             ],
             buf.as_slice()
+        );
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_fixed_size_index_scan() {
+        let client = Client::new_for_tests();
+        let tx = client.start_transaction().unwrap();
+
+        assert_transaction_empty!(tx);
+
+        let mut index = FixedSizeIndex::<'_, u64>::initialize(&tx).await.unwrap();
+
+        index.set_balancing_parameters(4, 256).unwrap();
+
+        assert_transaction_empty!(tx);
+
+        let all: Vec<_> = index.scan().try_collect().await.unwrap();
+        assert_eq!(all, vec![]);
+
+        // Insert 1024 values in the tree to trigger actual transaction writing as well as
+        // rebalancing.
+        for i in 0..1024 {
+            assert_insert_new!(
+                index,
+                i,
+                "this is a rather large value that is self-contained"
+            );
+        }
+
+        let all: Vec<_> = index.scan().try_collect().await.unwrap();
+        assert_eq!(
+            all,
+            (0..1024)
+                .map(|i| (
+                    i,
+                    blob_id!("this is a rather large value that is self-contained")
+                ))
+                .collect::<Vec<_>>()
         );
     }
 }

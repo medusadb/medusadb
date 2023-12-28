@@ -17,8 +17,9 @@ gorgondb = { path = "crates/gorgondb" }
 medusadb = { path = "crates/medusadb" }
 
 anyhow = "1"
-async-compat = "0.2.1"
-async-trait = "0.1.74"
+async-compat = "0.2.3"
+async-trait = "0.1.75"
+async-stream = "0.3.5"
 aws-config = "1"
 aws-sdk-s3 = "1"
 aws-sdk-dynamodb = "1"
