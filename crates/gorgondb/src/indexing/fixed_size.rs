@@ -960,6 +960,34 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
 
         while let Some(diff) = stack.pop_front() {
             match diff {
+                DiffStackItem::OnlyLeft(SingleDiffStackItem {
+                    key_prefix_path,
+                    key_prefix,
+                    branch,
+                }) => {
+                    let stream = self.scan_branch(key_prefix_path, key_prefix, branch);
+
+                    tokio::pin!(stream);
+
+                    while let Some((key, value)) = stream.next().await.transpose()? {
+                        tracing::trace!("left-only: `{key:?}` => {value}");
+                        visitor(TreeDiff::LeftOnly { key, value }).await;
+                    }
+                }
+                DiffStackItem::OnlyRight(SingleDiffStackItem {
+                    key_prefix_path,
+                    key_prefix,
+                    branch,
+                }) => {
+                    let stream = other.scan_branch(key_prefix_path, key_prefix, branch);
+
+                    tokio::pin!(stream);
+
+                    while let Some((key, value)) = stream.next().await.transpose()? {
+                        tracing::trace!("right-only: `{key:?}` => {value}");
+                        visitor(TreeDiff::RightOnly { key, value }).await;
+                    }
+                }
                 DiffStackItem::SamePrefix(SameSizeDiffStackItem {
                     key_prefix_path,
                     key_prefix,
@@ -1050,38 +1078,80 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                                 //
                                 // We must add a deferred comparison of each of left's child
                                 // children with the right child.
-                                left_children = &left_children[1..];
+                                tracing::trace!(
+                                    "left child `{key_prefix_path}.{left_child_key}` is a prefix of right child `{key_prefix_path}.{right_child_key}`."
+                                );
+
                                 right_children = &right_children[1..];
+                                left_children = &left_children[1..];
 
-                                let (left, right) = try_join!(
-                                    self.fetch_branch(left_child_blob_id),
-                                    other.fetch_branch(right_child_blob_id)
-                                )?;
+                                let mut start_key_prefix = None;
+                                let mut stop_key_prefix;
+                                let mut next_pair = Some((right_child_key, right_child_blob_id));
 
-                                let mut right_key_prefix = key_prefix.clone();
-                                right_key_prefix.extend_from_slice(&right_child_key.0);
-                                let mut right_key_prefix_path = key_prefix_path.clone();
-                                right_key_prefix_path.push(right_child_key.clone());
+                                while let Some((right_child_key, right_child_blob_id)) =
+                                    next_pair.take()
+                                {
+                                    stop_key_prefix = match right_children.first() {
+                                        Some(TreeItem(
+                                            next_right_child_key,
+                                            next_right_child_blob_id,
+                                        )) if next_right_child_key.has_prefix(left_child_key) => {
+                                            let mut stop_key_prefix = key_prefix.clone();
+                                            stop_key_prefix
+                                                .extend_from_slice(&next_right_child_key.0);
 
-                                let mut left_key_prefix = key_prefix.clone();
-                                left_key_prefix.extend_from_slice(&left_child_key.0);
-                                let mut left_key_prefix_path = key_prefix_path.clone();
-                                left_key_prefix_path.push(left_child_key.clone());
+                                            next_pair = Some((
+                                                next_right_child_key,
+                                                next_right_child_blob_id,
+                                            ));
+                                            right_children = &right_children[1..];
 
-                                stack.push_back(DiffStackItem::ShorterLeft(
-                                    AsymmetricDiffStackItem {
-                                        left_key_prefix_path,
-                                        left_key_prefix,
-                                        left,
-                                        right_key_prefix_path,
-                                        right_key_prefix,
-                                        right,
-                                    },
-                                ));
+                                            Some(stop_key_prefix)
+                                        }
+                                        _ => None,
+                                    };
+
+                                    // TODO: We could probably optimize this by fetching all the
+                                    // children in parallel.
+                                    let (left, right) = try_join!(
+                                        self.fetch_branch(left_child_blob_id),
+                                        other.fetch_branch(right_child_blob_id)
+                                    )?;
+
+                                    let mut right_key_prefix = key_prefix.clone();
+                                    right_key_prefix.extend_from_slice(&right_child_key.0);
+                                    let mut right_key_prefix_path = key_prefix_path.clone();
+                                    right_key_prefix_path.push(right_child_key.clone());
+
+                                    let mut left_key_prefix = key_prefix.clone();
+                                    left_key_prefix.extend_from_slice(&left_child_key.0);
+                                    let mut left_key_prefix_path = key_prefix_path.clone();
+                                    left_key_prefix_path.push(left_child_key.clone());
+
+                                    stack.push_back(DiffStackItem::ShorterLeft(
+                                        AsymmetricDiffStackItem {
+                                            left_key_prefix_path,
+                                            left_key_prefix,
+                                            left,
+                                            right_key_prefix_path,
+                                            right_key_prefix,
+                                            right,
+                                            start_key_prefix,
+                                            stop_key_prefix: stop_key_prefix.clone(),
+                                        },
+                                    ));
+
+                                    start_key_prefix = stop_key_prefix;
+                                }
                             }
                             Ordering::Less => {
                                 // The left child is smaller than the right child but not a prefix:
                                 // we can return all its sub-tree as left-only.
+                                tracing::trace!(
+                                    "left child `{key_prefix_path}.{left_child_key}` is smaller than right child `{key_prefix_path}.{right_child_key}`."
+                                );
+
                                 left_children = &left_children[1..];
 
                                 let mut left_key_prefix = key_prefix.clone();
@@ -1122,38 +1192,79 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                                 //
                                 // We must add a deferred comparison of each of right's child
                                 // children with the left child.
+                                tracing::trace!(
+                                    "right child `{key_prefix_path}.{right_child_key}` is a prefix of left child `{key_prefix_path}.{left_child_key}`."
+                                );
+
                                 left_children = &left_children[1..];
                                 right_children = &right_children[1..];
+                                let mut start_key_prefix = None;
+                                let mut stop_key_prefix;
+                                let mut next_pair = Some((left_child_key, left_child_blob_id));
 
-                                let (left, right) = try_join!(
-                                    self.fetch_branch(left_child_blob_id),
-                                    other.fetch_branch(right_child_blob_id)
-                                )?;
+                                while let Some((left_child_key, left_child_blob_id)) =
+                                    next_pair.take()
+                                {
+                                    stop_key_prefix = match left_children.first() {
+                                        Some(TreeItem(
+                                            next_left_child_key,
+                                            next_left_child_blob_id,
+                                        )) if next_left_child_key.has_prefix(right_child_key) => {
+                                            let mut stop_key_prefix = key_prefix.clone();
+                                            stop_key_prefix
+                                                .extend_from_slice(&next_left_child_key.0);
 
-                                let mut left_key_prefix = key_prefix.clone();
-                                left_key_prefix.extend_from_slice(&left_child_key.0);
-                                let mut left_key_prefix_path = key_prefix_path.clone();
-                                left_key_prefix_path.push(left_child_key.clone());
+                                            next_pair = Some((
+                                                next_left_child_key,
+                                                next_left_child_blob_id,
+                                            ));
+                                            left_children = &left_children[1..];
 
-                                let mut right_key_prefix = key_prefix.clone();
-                                right_key_prefix.extend_from_slice(&right_child_key.0);
-                                let mut right_key_prefix_path = key_prefix_path.clone();
-                                right_key_prefix_path.push(right_child_key.clone());
+                                            Some(stop_key_prefix)
+                                        }
+                                        _ => None,
+                                    };
 
-                                stack.push_back(DiffStackItem::ShorterRight(
-                                    AsymmetricDiffStackItem {
-                                        left_key_prefix_path,
-                                        left_key_prefix,
-                                        left,
-                                        right_key_prefix_path,
-                                        right_key_prefix,
-                                        right,
-                                    },
-                                ));
+                                    // TODO: We could probably optimize this by fetching all the
+                                    // children in parallel.
+                                    let (left, right) = try_join!(
+                                        self.fetch_branch(left_child_blob_id),
+                                        other.fetch_branch(right_child_blob_id)
+                                    )?;
+
+                                    let mut left_key_prefix = key_prefix.clone();
+                                    left_key_prefix.extend_from_slice(&left_child_key.0);
+                                    let mut left_key_prefix_path = key_prefix_path.clone();
+                                    left_key_prefix_path.push(left_child_key.clone());
+
+                                    let mut right_key_prefix = key_prefix.clone();
+                                    right_key_prefix.extend_from_slice(&right_child_key.0);
+                                    let mut right_key_prefix_path = key_prefix_path.clone();
+                                    right_key_prefix_path.push(right_child_key.clone());
+
+                                    stack.push_back(DiffStackItem::ShorterRight(
+                                        AsymmetricDiffStackItem {
+                                            left_key_prefix_path,
+                                            left_key_prefix,
+                                            left,
+                                            right_key_prefix_path,
+                                            right_key_prefix,
+                                            right,
+                                            start_key_prefix,
+                                            stop_key_prefix: stop_key_prefix.clone(),
+                                        },
+                                    ));
+
+                                    start_key_prefix = stop_key_prefix;
+                                }
                             }
                             Ordering::Greater => {
                                 // The right child is smaller than the left child but not a prefix:
                                 // we can return all its sub-tree as right-only.
+                                tracing::trace!(
+                                    "right child `{key_prefix_path}.{right_child_key}` is smaller than left child `{key_prefix_path}.{left_child_key}`."
+                                );
+
                                 right_children = &right_children[1..];
 
                                 let mut right_key_prefix = key_prefix.clone();
@@ -1195,7 +1306,7 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                     }
 
                     tracing::trace!(
-                        "children comparison complete: yielding potential remaining children..."
+                        "same prefix children comparison complete: yielding potential remaining children..."
                     );
 
                     // The leftover children in the left tree are necessarily greater than the rightmost
@@ -1267,27 +1378,31 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                     right_key_prefix_path,
                     right_key_prefix,
                     right,
+                    start_key_prefix,
+                    stop_key_prefix,
                 }) => {
                     let left_children = left.children.as_slice();
 
-                    while let Some(TreeItem(sub_key, sub_blob_id)) = left_children.first() {
+                    for TreeItem(sub_key, sub_blob_id) in left_children {
                         let mut sub_key_prefix = left_key_prefix.clone();
                         sub_key_prefix.extend_from_slice(&sub_key.0);
 
                         match sub_key_prefix.cmp(&right_key_prefix) {
                             Ordering::Equal => {
+                                tracing::trace!("child has reached same prefix...");
+
                                 let left = self.fetch_branch(sub_blob_id).await?;
 
                                 stack.push_back(DiffStackItem::SamePrefix(SameSizeDiffStackItem {
                                     key_prefix_path: right_key_prefix_path.clone(),
                                     key_prefix: right_key_prefix.clone(),
                                     left,
-                                    right,
+                                    right: right.clone(),
                                 }));
-
-                                break;
                             }
                             Ordering::Less if right_key_prefix.starts_with(&sub_key_prefix) => {
+                                tracing::trace!("child is still a sub-prefix...");
+
                                 // The left sub-tree is still a prefix of the right sub-tree.
                                 let left = self.fetch_branch(sub_blob_id).await?;
 
@@ -1299,15 +1414,26 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                                         left_key_prefix_path: sub_key_prefix_path,
                                         left_key_prefix: sub_key_prefix,
                                         left,
-                                        right_key_prefix_path,
-                                        right_key_prefix,
-                                        right,
+                                        right_key_prefix_path: right_key_prefix_path.clone(),
+                                        right_key_prefix: right_key_prefix.clone(),
+                                        right: right.clone(),
+                                        start_key_prefix: start_key_prefix.clone(),
+                                        stop_key_prefix: stop_key_prefix.clone(),
                                     },
                                 ));
-
-                                break;
                             }
                             Ordering::Less => {
+                                match &start_key_prefix {
+                                    Some(start_key_prefix) if sub_key_prefix < start_key_prefix => {
+                                        tracing::trace!("left child has not yet reached start key prefix: skipping it.");
+
+                                        break;
+                                    }
+                                    _ => {
+                                        tracing::trace!("child is less and not a sub-prefix...");
+                                    }
+                                };
+
                                 let mut sub_key_prefix_path = left_key_prefix_path.clone();
                                 sub_key_prefix_path.push(sub_key.clone());
 
@@ -1323,37 +1449,26 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                                 }
                             }
                             Ordering::Greater => {
-                                let children = other.scan_branch(
-                                    right_key_prefix_path,
-                                    right_key_prefix,
-                                    right,
-                                );
+                                match &stop_key_prefix {
+                                    Some(stop_key_prefix) if sub_key_prefix >= stop_key_prefix => {
+                                        tracing::trace!("left child has reached stop key prefix: stopping iteration.");
 
-                                tokio::pin!(children);
+                                        break;
+                                    }
+                                    _ => {
+                                        tracing::trace!(
+                                            "child is greater and hasn't reached the stop key..."
+                                        );
+                                    }
+                                };
 
-                                while let Some((key, value)) = children.next().await.transpose()? {
-                                    tracing::trace!("right-only: `{key:?}` => {value}");
-                                    visitor(TreeDiff::RightOnly { key, value }).await;
-                                }
-
-                                break;
+                                stack.push_back(DiffStackItem::OnlyRight(SingleDiffStackItem {
+                                    key_prefix_path: right_key_prefix_path.clone(),
+                                    key_prefix: right_key_prefix.clone(),
+                                    branch: right.clone(),
+                                }));
                             }
                         }
-                    }
-
-                    // If we have any sub-children left, we must yield them as
-                    // left-only.
-                    for TreeItem(sub_key, sub_blob_id) in left_children {
-                        let mut sub_key_prefix = left_key_prefix.clone();
-                        sub_key_prefix.extend_from_slice(&sub_key.0);
-
-                        let key = Key::from_slice(&sub_key_prefix);
-                        tracing::trace!("left-only: `{key:?}` => {sub_blob_id}");
-                        visitor(TreeDiff::LeftOnly {
-                            key,
-                            value: sub_blob_id.clone(),
-                        })
-                        .await;
                     }
                 }
                 DiffStackItem::ShorterRight(AsymmetricDiffStackItem {
@@ -1363,27 +1478,35 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                     right_key_prefix_path,
                     right_key_prefix,
                     right,
+                    start_key_prefix,
+                    stop_key_prefix,
                 }) => {
                     let right_children = right.children.as_slice();
 
-                    while let Some(TreeItem(sub_key, sub_blob_id)) = right_children.first() {
+                    tracing::trace!(
+                        "comparing children of shorter right branch `{right_key_prefix_path}` with left branch `{left_key_prefix_path}`..."
+                    );
+
+                    for TreeItem(sub_key, sub_blob_id) in right_children {
                         let mut sub_key_prefix = right_key_prefix.clone();
                         sub_key_prefix.extend_from_slice(&sub_key.0);
 
                         match sub_key_prefix.cmp(&left_key_prefix) {
                             Ordering::Equal => {
+                                tracing::trace!("child has reached same prefix...");
+
                                 let right = other.fetch_branch(sub_blob_id).await?;
 
                                 stack.push_back(DiffStackItem::SamePrefix(SameSizeDiffStackItem {
                                     key_prefix_path: left_key_prefix_path.clone(),
                                     key_prefix: left_key_prefix.clone(),
-                                    left,
+                                    left: left.clone(),
                                     right,
                                 }));
-
-                                break;
                             }
                             Ordering::Less if left_key_prefix.starts_with(&sub_key_prefix) => {
+                                tracing::trace!("child is still a sub-prefix...");
+
                                 // The right sub-tree is still a prefix of the left sub-tree.
                                 let right = other.fetch_branch(sub_blob_id).await?;
 
@@ -1392,21 +1515,34 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
 
                                 stack.push_back(DiffStackItem::ShorterRight(
                                     AsymmetricDiffStackItem {
-                                        left_key_prefix_path,
-                                        left_key_prefix,
-                                        left,
+                                        left_key_prefix_path: left_key_prefix_path.clone(),
+                                        left_key_prefix: left_key_prefix.clone(),
+                                        left: left.clone(),
                                         right_key_prefix_path: sub_key_prefix_path,
                                         right_key_prefix: sub_key_prefix,
                                         right,
+                                        start_key_prefix: start_key_prefix.clone(),
+                                        stop_key_prefix: stop_key_prefix.clone(),
                                     },
                                 ));
-
-                                break;
                             }
                             Ordering::Less => {
+                                match &start_key_prefix {
+                                    Some(start_key_prefix) if sub_key_prefix < start_key_prefix => {
+                                        tracing::trace!("right child has not yet reached start key prefix: skipping it.");
+
+                                        break;
+                                    }
+                                    _ => {
+                                        tracing::trace!("child is less and not a sub-prefix...");
+                                    }
+                                };
+
                                 let mut sub_key_prefix_path = right_key_prefix_path.clone();
                                 sub_key_prefix_path.push(sub_key.clone());
 
+                                //FIXME: this will likely create a tree corruption: we need to
+                                //check if we reached a leaf before fetching the branch.
                                 let right = other.fetch_branch(sub_blob_id).await?;
                                 let children =
                                     other.scan_branch(sub_key_prefix_path, sub_key_prefix, right);
@@ -1419,34 +1555,26 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                                 }
                             }
                             Ordering::Greater => {
-                                let children =
-                                    self.scan_branch(left_key_prefix_path, left_key_prefix, left);
+                                match &stop_key_prefix {
+                                    Some(stop_key_prefix) if sub_key_prefix >= stop_key_prefix => {
+                                        tracing::trace!("right child has reached stop key prefix: stopping iteration.");
 
-                                tokio::pin!(children);
+                                        break;
+                                    }
+                                    _ => {
+                                        tracing::trace!(
+                                            "child is greater and hasn't reached the stop key..."
+                                        );
+                                    }
+                                };
 
-                                while let Some((key, value)) = children.next().await.transpose()? {
-                                    tracing::trace!("left-only: `{key:?}` => {value}");
-                                    visitor(TreeDiff::LeftOnly { key, value }).await;
-                                }
-
-                                break;
+                                stack.push_back(DiffStackItem::OnlyLeft(SingleDiffStackItem {
+                                    key_prefix_path: left_key_prefix_path.clone(),
+                                    key_prefix: left_key_prefix.clone(),
+                                    branch: left.clone(),
+                                }));
                             }
                         }
-                    }
-
-                    // If we have any sub-children left, we must yield them as
-                    // right-only.
-                    for TreeItem(sub_key, sub_blob_id) in right_children {
-                        let mut sub_key_prefix = right_key_prefix.clone();
-                        sub_key_prefix.extend_from_slice(&sub_key.0);
-
-                        let key = Key::from_slice(&sub_key_prefix);
-                        tracing::trace!("right-only: `{key:?}` => {sub_blob_id}");
-                        visitor(TreeDiff::RightOnly {
-                            key,
-                            value: sub_blob_id.clone(),
-                        })
-                        .await;
                     }
                 }
             }
@@ -1467,8 +1595,16 @@ pub enum VisitResult {
 
 enum DiffStackItem {
     SamePrefix(SameSizeDiffStackItem),
+    OnlyLeft(SingleDiffStackItem),
+    OnlyRight(SingleDiffStackItem),
     ShorterLeft(AsymmetricDiffStackItem),
     ShorterRight(AsymmetricDiffStackItem),
+}
+
+struct SingleDiffStackItem {
+    key_prefix_path: TreePath,
+    key_prefix: BytesMut,
+    branch: Arc<TreeBranch>,
 }
 
 struct SameSizeDiffStackItem {
@@ -1485,6 +1621,8 @@ struct AsymmetricDiffStackItem {
     right_key_prefix_path: TreePath,
     right_key_prefix: BytesMut,
     right: Arc<TreeBranch>,
+    start_key_prefix: Option<BytesMut>,
+    stop_key_prefix: Option<BytesMut>,
 }
 
 #[cfg(test)]
@@ -1712,7 +1850,11 @@ mod tests {
 
         left.visit_differences(right, |diff| {
             Box::pin(async {
-                results.lock().await.push(diff);
+                let mut results = results.lock().await;
+
+                results.push(diff);
+
+                assert!(results.len() < 10);
 
                 VisitResult::Continue
             })
@@ -1803,8 +1945,9 @@ mod tests {
             );
         }
 
-        #[cfg(not(test))]
         {
+            // Test comparison of trees that have the same semantic content but vastly different
+            // structures due to different balancing parameters.
             let mut index3 = FixedSizeIndex::<u64>::new(index.transaction().fork("tx3").await);
 
             index3.set_balancing_parameters(1, 4).unwrap();
@@ -1812,6 +1955,12 @@ mod tests {
             for i in 1..1024 {
                 assert_insert_new!(index3, i, "value");
             }
+
+            let diffs: Vec<_> = collect_diff(&index, &index3).await;
+            assert_eq!(diffs, vec![]);
+
+            let diffs: Vec<_> = collect_diff(&index3, &index).await;
+            assert_eq!(diffs, vec![]);
 
             assert_insert_new!(index3, 0, "new-value");
             assert_insert_update!(index3, 16, "other-value", "value");

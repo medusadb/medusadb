@@ -17,7 +17,7 @@ test:
   cargo test --doc
 
 check-setup:
-  cargo install cargo-deny cargo-audit cargo-vet
+  cargo install cargo-deny cargo-audit cargo-vet cargo-machete
 
 check:
   cargo fmt --all -- --check
@@ -25,6 +25,7 @@ check:
   cargo deny check
   cargo audit
   cargo vet
+  cargo machete
 
 doc:
   cargo doc --workspace --no-deps

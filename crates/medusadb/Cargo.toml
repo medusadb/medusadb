@@ -11,4 +11,4 @@ categories = ["database"]
 keywords = ["blob-storage", "gorgondb", "medusadb", "immutable", "cache"]
 
 [dependencies]
-gorgondb.workspace = true
+#gorgondb.workspace = true
