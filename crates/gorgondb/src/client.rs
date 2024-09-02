@@ -90,7 +90,12 @@ impl Client {
     }
 
     /// Start a new transaction on the client.
-    pub fn start_transaction(&self) -> std::io::Result<Transaction> {
-        Transaction::new(self.gorgon.clone(), self.storage.clone())
+    ///
+    /// `name` is a human-readable name for the transaction. This is mostly useful for debugging.
+    pub fn start_transaction(
+        &self,
+        name: impl Into<Cow<'static, str>>,
+    ) -> std::io::Result<Transaction> {
+        Transaction::new(name, self.gorgon.clone(), self.storage.clone())
     }
 }

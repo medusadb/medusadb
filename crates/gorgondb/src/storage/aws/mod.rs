@@ -1,5 +1,3 @@
-#![cfg(feature = "aws")]
-
 use std::{borrow::Cow, fmt::Display, sync::Arc};
 
 use aws_config::SdkConfig;

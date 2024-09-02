@@ -5,9 +5,9 @@ use gorgondb::{indexing::FixedSizeIndex, BlobId, Client};
 
 async fn fixed_size_index() {
     let client = Client::new_for_tests();
-    let tx = client.start_transaction().unwrap();
+    let tx = client.start_transaction("tx1").unwrap();
 
-    let mut index = FixedSizeIndex::<'_, u128>::initialize(&tx).await.unwrap();
+    let mut index = FixedSizeIndex::<u128>::new(tx);
 
     //index.min_count = 4;
     //index.max_count = 256; // This will force a factorization for each byte of the key.

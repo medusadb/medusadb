@@ -1,23 +1,51 @@
 //! A storage that uses the local filesystem.
 
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use hex::ToHex;
+use tempfile::TempDir;
 
 use crate::{filesystem::AsyncFileSource, AsyncSource, Filesystem, RemoteRef};
 
 /// A storage that stores value on disk.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FilesystemStorage {
     filesystem: Filesystem,
-    root: PathBuf,
+    root: Root,
+}
+
+#[derive(Debug, Clone)]
+enum Root {
+    PathBuf(PathBuf),
+    TempDir(Arc<TempDir>),
+}
+
+impl AsRef<Path> for Root {
+    fn as_ref(&self) -> &Path {
+        match self {
+            Self::PathBuf(path) => path,
+            Self::TempDir(path) => path.as_ref().as_ref(),
+        }
+    }
 }
 
 impl FilesystemStorage {
-    /// Instantiate a new filesystem storage storing its file at the specified location.
+    /// Instantiate a new filesystem storage storing its files at the specified location.
     pub fn new(filesystem: Filesystem, root: impl Into<PathBuf>) -> std::io::Result<Self> {
-        let root = root.into();
+        let root = Root::PathBuf(root.into());
         std::fs::create_dir_all(&root)?;
+
+        Ok(Self { filesystem, root })
+    }
+
+    /// Instantiate a new filesystem storage storing its files at a temporary location.
+    ///
+    /// Deleting the storage instance will remove the files.
+    pub fn new_temporary(filesystem: Filesystem) -> std::io::Result<Self> {
+        let root = Root::TempDir(Arc::new(tempfile::TempDir::new()?));
 
         Ok(Self { filesystem, root })
     }
@@ -66,6 +94,11 @@ impl FilesystemStorage {
         let (second, rest) = rest.split_at(2);
         let (third, _) = rest.split_at(2);
 
-        self.root.join(first).join(second).join(third).join(hex_id)
+        self.root
+            .as_ref()
+            .join(first)
+            .join(second)
+            .join(third)
+            .join(hex_id)
     }
 }

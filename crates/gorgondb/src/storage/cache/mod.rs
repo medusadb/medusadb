@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeDelta, Utc};
 use std::{
     borrow::Cow,
     cmp::{max, min},
@@ -201,8 +201,8 @@ struct IndexEntry {
 
 impl Default for CacheImpl {
     fn default() -> Self {
-        let expiration_respite_increment = Duration::minutes(15);
-        let max_expiration_respite = Duration::hours(24);
+        let expiration_respite_increment = TimeDelta::try_minutes(15).expect("should be valid");
+        let max_expiration_respite = TimeDelta::try_hours(24).expect("should be valid");
 
         Self {
             by_id: Default::default(),
@@ -460,8 +460,8 @@ mod tests {
         let mut by_expirations = ByExpiration::default();
 
         let now = Utc::now();
-        let later = now + Duration::seconds(1);
-        let sooner = now - Duration::seconds(1);
+        let later = now + TimeDelta::try_seconds(1).expect("should be valid");
+        let sooner = now - TimeDelta::try_seconds(1).expect("should be valid");
 
         let a = RemoteRef::for_slice(&[0x01; 100]);
         let b = RemoteRef::for_slice(&[0x02; 100]);

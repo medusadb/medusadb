@@ -1,11 +1,15 @@
 use async_stream::try_stream;
+use std::cmp::Ordering;
 use std::{
+    borrow::Cow,
     collections::VecDeque,
     marker::PhantomData,
     mem::size_of,
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
 };
+use tokio::try_join;
+use tracing::trace;
 
 use byteorder::ByteOrder;
 use bytes::{Bytes, BytesMut};
@@ -16,7 +20,7 @@ use crate::{gorgon::StoreOptions, BlobId, Transaction};
 
 use super::{
     tree::{ByteDeserialize, ByteSerialize, TreeItem},
-    BinaryTreePathElement, Cache, Error,
+    BinaryTreePathElement, Cache, Error, TreeDiff,
 };
 
 /// A trait for types that can be used as a fixed-size key.
@@ -145,7 +149,7 @@ impl TreeMeta {
         &mut self,
         diff: impl TryInto<i128, Error = E>,
     ) {
-        let total_size: i128 = self.total_size.try_into().expect("should fit into a i128");
+        let total_size: i128 = self.total_size.into();
         let total_size = total_size + diff.try_into().expect("should fit into a i128");
         self.total_size = total_size.try_into().expect("should fit into a i64");
     }
@@ -184,31 +188,37 @@ impl ByteDeserialize for TreeRoot {}
 
 /// A distributed map that stores key with a fixed-size.
 #[derive(Debug)]
-pub struct FixedSizeIndex<'t, Key> {
+pub struct FixedSizeIndex<Key> {
     _phantom: PhantomData<Key>,
     root: TreeRoot,
-    transaction: &'t Transaction,
+    transaction: Transaction,
     cache: Cache<Arc<TreeBranch>>,
 }
 
-impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
+impl<Key> FixedSizeIndex<Key> {
+    fn default_cache() -> Cache<Arc<TreeBranch>> {
+        Cache::new(NonZeroUsize::new(1024).unwrap())
+    }
+}
+
+impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
     /// Instantiate a new, empty, index.
-    pub async fn initialize(transaction: &'t Transaction) -> Result<Self> {
+    pub fn new(transaction: Transaction) -> Self {
         // Let's set a max tree size of 200KB, which is a good default for AWS DynamoDB.
         let max_tree_size = 200 * 1024;
         let root = TreeRoot::new_for_max_tree_size(max_tree_size, Key::KEY_SIZE.get());
 
-        Ok(Self {
+        Self {
             _phantom: Default::default(),
             root,
             transaction,
-            cache: Cache::new(NonZeroUsize::new(1024).unwrap()),
-        })
+            cache: Self::default_cache(),
+        }
     }
 
     /// Load an index from its root id.
-    pub async fn load(transaction: &'t Transaction, root_id: BlobId) -> Result<Self> {
-        let root = Self::fetch_root_tx(transaction, &root_id).await?;
+    pub async fn load(transaction: Transaction, root_id: BlobId) -> Result<Self> {
+        let root = Self::fetch_root_tx(&transaction, &root_id).await?;
 
         Ok(Self {
             _phantom: Default::default(),
@@ -241,6 +251,19 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         Ok(())
     }
 
+    /// Fork the index, producing a new, identical index that is completely independant from the
+    /// initial one.
+    ///
+    /// All the uncommited data both in memory or on disk will be duplicated.
+    pub async fn fork(&self, transaction_name: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            _phantom: PhantomData,
+            root: self.root.clone(),
+            transaction: self.transaction.fork(transaction_name).await,
+            cache: Self::default_cache(),
+        }
+    }
+
     /// Set the balancing parameters on the tree.
     ///
     /// This dictates the average amount of elements per layer of the tree.
@@ -269,6 +292,11 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         self.root.max_count = max_count;
 
         Ok(())
+    }
+
+    /// Get a reference to the associated transaction.
+    pub fn transaction(&self) -> &Transaction {
+        &self.transaction
     }
 
     /// Get a value from the index.
@@ -305,8 +333,8 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
                 // Set the parameters for the stack update.
                 count_diff = 0;
-                let new_size: i128 = new_size.try_into().expect("should fit a i128");
-                let old_size: i128 = old_value.size().try_into().expect("should fit a i128");
+                let new_size: i128 = new_size.into();
+                let old_size: i128 = old_value.size().into();
                 size_diff = new_size - old_size;
 
                 result = Some(old_value.clone());
@@ -329,7 +357,7 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
                 // Set the parameters for the stack update.
                 // There was no such key, so no previous value to return.
                 count_diff = 1;
-                size_diff = new_size.try_into().expect("should fit into a i128");
+                size_diff = new_size.into();
                 result = None;
 
                 // There is some more key material to create under the missing key:
@@ -582,10 +610,24 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
 
     async fn fetch_branch(&self, id: &BlobId) -> Result<Arc<TreeBranch>> {
         match self.cache.get(id) {
-            Some(branch) => Ok(branch.clone()),
-            None => Self::fetch_branch_tx(self.transaction, id)
-                .await
-                .map(Arc::new),
+            Some(branch) => {
+                trace!(
+                    "cache hit while fetching branch `{id}` in index with transaction `{}`",
+                    self.transaction.name()
+                );
+
+                Ok(branch.clone())
+            }
+            None => {
+                trace!(
+                    "cache miss while fetching branch `{id}` in index with transaction `{}`",
+                    self.transaction.name()
+                );
+
+                Self::fetch_branch_tx(&self.transaction, id)
+                    .await
+                    .map(Arc::new)
+            }
         }
     }
 
@@ -781,17 +823,35 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
     /// this to search for values. It's almost never what you want.
     pub fn scan(&self) -> impl Stream<Item = Result<(Key, BlobId)>> + '_ {
         try_stream! {
-            if let Some(branch_id) = &self.root.branch_id {
-                let branch = self.fetch_branch(branch_id).await?;
-                let key_prefix_path = TreePath::default();
-                let key_prefix = BytesMut::new();
-                let stream = self.scan_branch(key_prefix_path, key_prefix, branch);
+            match &self.root.branch_id {
+                Some(branch_id) => {
+                    let stream = self.scan_root(branch_id);
 
-                tokio::pin!(stream);
+                    tokio::pin!(stream);
 
-                while let Some(item) = stream.next().await {
-                    yield item?;
+                    while let Some(item) = stream.next().await {
+                        yield item?;
+                    }
                 }
+                None => {}
+            }
+        }
+    }
+
+    fn scan_root<'s>(
+        &'s self,
+        branch_id: &'s BlobId,
+    ) -> impl Stream<Item = Result<(Key, BlobId)>> + 's {
+        try_stream! {
+            let branch = self.fetch_branch(branch_id).await?;
+            let key_prefix_path = TreePath::default();
+            let key_prefix = BytesMut::new();
+            let stream = self.scan_branch(key_prefix_path, key_prefix, branch);
+
+            tokio::pin!(stream);
+
+            while let Some(item) = stream.next().await {
+                yield item?;
             }
         }
     }
@@ -839,20 +899,592 @@ impl<'t, Key: FixedSizeKey + Send + Sync> FixedSizeIndex<'t, Key> {
         }
     }
 
-    // /// Compute the difference between two trees.
-    // ///
-    // /// # Warning
-    // ///
-    // /// This method attempts to be as efficient as possible, but calling it on two widely
-    // /// different big trees will take a huge amount of time and iterations.
-    // ///
-    // /// It should almost only be called on trees that you know have very little differences.
-    // fn diff(
-    //     &self,
-    //     other: &TreeRoot,
-    // ) -> Result<impl TryStream<Ok = TreeDiff<Key>, Error = Error<BinaryTreePathElement>>> {
-    //     unimplemented!()
-    // }
+    /// Visit the differences between two trees.
+    ///
+    /// The differences are visited in strict key order.
+    pub async fn visit_differences<'s>(
+        &'s self,
+        other: &'s Self,
+        visitor: impl Fn(TreeDiff<Key>) -> BoxFuture<'s, VisitResult> + 's,
+    ) -> Result<()> {
+        let mut stack = VecDeque::new();
+
+        match (&self.root.branch_id, &other.root.branch_id) {
+            (None, None) => {
+                tracing::debug!("comparing two empty indexes: no differences.");
+            }
+            (Some(branch_id), Some(other_branch_id)) => {
+                trace!("Diffing roots `{branch_id}` and `{other_branch_id}`...");
+
+                let left = self.fetch_branch(branch_id).await?;
+                let right = other.fetch_branch(other_branch_id).await?;
+
+                let stack_item = DiffStackItem::SamePrefix(SameSizeDiffStackItem {
+                    key_prefix_path: TreePath::default(),
+                    key_prefix: BytesMut::new(),
+                    left,
+                    right,
+                });
+
+                stack.push_back(stack_item);
+            }
+            (Some(branch_id), None) => {
+                tracing::debug!(
+                    "comparing an non-empty index `{branch_id}` with an empty index: yielding all values..."
+                );
+
+                let stream = self.scan_root(branch_id);
+
+                tokio::pin!(stream);
+
+                while let Some(item) = stream.next().await {
+                    let (key, value) = item?;
+                    tracing::trace!("left-only: `{key:?}` => {value}");
+                    visitor(TreeDiff::LeftOnly { key, value }).await;
+                }
+            }
+            (None, Some(other_branch_id)) => {
+                tracing::debug!("comparing an empty index to a non-empty index `{other_branch_id}`: yielding all other values...");
+
+                let stream = self.scan_root(other_branch_id);
+
+                tokio::pin!(stream);
+
+                while let Some(item) = stream.next().await {
+                    let (key, value) = item?;
+                    tracing::trace!("right-only: `{key:?}` => {value}");
+                    visitor(TreeDiff::RightOnly { key, value }).await;
+                }
+            }
+        };
+
+        while let Some(diff) = stack.pop_front() {
+            match diff {
+                DiffStackItem::SamePrefix(SameSizeDiffStackItem {
+                    key_prefix_path,
+                    key_prefix,
+                    left,
+                    right,
+                }) => {
+                    tracing::trace!("comparing two keys with identical prefix: {key_prefix_path}");
+
+                    // The keys have the same exact same prefix, so we can compare the children
+                    // directly.
+
+                    let mut left_children = left.children.as_slice();
+                    let mut right_children = right.children.as_slice();
+
+                    while let (
+                        Some(TreeItem(left_child_key, left_child_blob_id)),
+                        Some(TreeItem(right_child_key, right_child_blob_id)),
+                    ) = (left_children.first(), right_children.first())
+                    {
+                        // While we have children on both sides, we can compare them directly.
+                        tracing::trace!(
+                            "comparing children `{key_prefix_path}.{left_child_key}` vs `{key_prefix_path}.{right_child_key}`..."
+                        );
+
+                        match left_child_key.cmp(right_child_key) {
+                            Ordering::Equal => {
+                                // Progress the children on both sides.
+                                left_children = &left_children[1..];
+                                right_children = &right_children[1..];
+
+                                if left_child_blob_id == right_child_blob_id {
+                                    tracing::trace!(
+                                        "children `{key_prefix_path}.{left_child_key}` and `{key_prefix_path}.{right_child_key}` are the same."
+                                    );
+
+                                    // If the children are the same, we can skip them.
+                                    continue;
+                                }
+
+                                tracing::trace!(
+                                    "children `{key_prefix_path}.{left_child_key}` and `{key_prefix_path}.{right_child_key}` are different."
+                                );
+
+                                let mut sub_key_prefix = key_prefix.clone();
+                                sub_key_prefix.extend_from_slice(&left_child_key.0);
+
+                                if sub_key_prefix.len() == Key::KEY_USIZE {
+                                    let key = Key::from_slice(&sub_key_prefix);
+                                    tracing::trace!("left-only: `{key:?}` => {left_child_blob_id}");
+
+                                    visitor(TreeDiff::LeftOnly {
+                                        key,
+                                        value: left_child_blob_id.clone(),
+                                    })
+                                    .await;
+
+                                    let key = Key::from_slice(&sub_key_prefix);
+                                    tracing::trace!(
+                                        "right-only: `{key:?}` => {right_child_blob_id}"
+                                    );
+
+                                    visitor(TreeDiff::RightOnly {
+                                        key,
+                                        value: right_child_blob_id.clone(),
+                                    })
+                                    .await;
+                                } else {
+                                    let mut sub_key_prefix_path = key_prefix_path.clone();
+                                    sub_key_prefix_path.push(left_child_key.clone());
+
+                                    let (left, right) = try_join!(
+                                        self.fetch_branch(left_child_blob_id),
+                                        other.fetch_branch(right_child_blob_id)
+                                    )?;
+
+                                    stack.push_back(DiffStackItem::SamePrefix(
+                                        SameSizeDiffStackItem {
+                                            key_prefix_path: sub_key_prefix_path,
+                                            key_prefix: sub_key_prefix,
+                                            left,
+                                            right,
+                                        },
+                                    ));
+                                }
+                            }
+                            Ordering::Less if right_child_key.has_prefix(left_child_key) => {
+                                // The left child is a prefix of the right child.
+                                //
+                                // We must add a deferred comparison of each of left's child
+                                // children with the right child.
+                                left_children = &left_children[1..];
+                                right_children = &right_children[1..];
+
+                                let (left, right) = try_join!(
+                                    self.fetch_branch(left_child_blob_id),
+                                    other.fetch_branch(right_child_blob_id)
+                                )?;
+
+                                let mut right_key_prefix = key_prefix.clone();
+                                right_key_prefix.extend_from_slice(&right_child_key.0);
+                                let mut right_key_prefix_path = key_prefix_path.clone();
+                                right_key_prefix_path.push(right_child_key.clone());
+
+                                let mut left_key_prefix = key_prefix.clone();
+                                left_key_prefix.extend_from_slice(&left_child_key.0);
+                                let mut left_key_prefix_path = key_prefix_path.clone();
+                                left_key_prefix_path.push(left_child_key.clone());
+
+                                stack.push_back(DiffStackItem::ShorterLeft(
+                                    AsymmetricDiffStackItem {
+                                        left_key_prefix_path,
+                                        left_key_prefix,
+                                        left,
+                                        right_key_prefix_path,
+                                        right_key_prefix,
+                                        right,
+                                    },
+                                ));
+                            }
+                            Ordering::Less => {
+                                // The left child is smaller than the right child but not a prefix:
+                                // we can return all its sub-tree as left-only.
+                                left_children = &left_children[1..];
+
+                                let mut left_key_prefix = key_prefix.clone();
+                                left_key_prefix.extend_from_slice(&left_child_key.0);
+
+                                if left_key_prefix.len() == Key::KEY_USIZE {
+                                    let key = Key::from_slice(&left_key_prefix);
+                                    tracing::trace!("left-only: `{key:?}` => {left_child_blob_id}");
+
+                                    visitor(TreeDiff::LeftOnly {
+                                        key,
+                                        value: left_child_blob_id.clone(),
+                                    })
+                                    .await;
+                                } else {
+                                    let mut left_key_prefix_path = key_prefix_path.clone();
+                                    left_key_prefix_path.push(left_child_key.clone());
+
+                                    let left = self.fetch_branch(left_child_blob_id).await?;
+                                    let stream = self.scan_branch(
+                                        left_key_prefix_path,
+                                        left_key_prefix,
+                                        left,
+                                    );
+
+                                    tokio::pin!(stream);
+
+                                    while let Some((key, value)) =
+                                        stream.next().await.transpose()?
+                                    {
+                                        tracing::trace!("left-only: `{key:?}` => {value}");
+                                        visitor(TreeDiff::LeftOnly { key, value }).await;
+                                    }
+                                }
+                            }
+                            Ordering::Greater if left_child_key.has_prefix(right_child_key) => {
+                                // The right child is a prefix of the left child.
+                                //
+                                // We must add a deferred comparison of each of right's child
+                                // children with the left child.
+                                left_children = &left_children[1..];
+                                right_children = &right_children[1..];
+
+                                let (left, right) = try_join!(
+                                    self.fetch_branch(left_child_blob_id),
+                                    other.fetch_branch(right_child_blob_id)
+                                )?;
+
+                                let mut left_key_prefix = key_prefix.clone();
+                                left_key_prefix.extend_from_slice(&left_child_key.0);
+                                let mut left_key_prefix_path = key_prefix_path.clone();
+                                left_key_prefix_path.push(left_child_key.clone());
+
+                                let mut right_key_prefix = key_prefix.clone();
+                                right_key_prefix.extend_from_slice(&right_child_key.0);
+                                let mut right_key_prefix_path = key_prefix_path.clone();
+                                right_key_prefix_path.push(right_child_key.clone());
+
+                                stack.push_back(DiffStackItem::ShorterRight(
+                                    AsymmetricDiffStackItem {
+                                        left_key_prefix_path,
+                                        left_key_prefix,
+                                        left,
+                                        right_key_prefix_path,
+                                        right_key_prefix,
+                                        right,
+                                    },
+                                ));
+                            }
+                            Ordering::Greater => {
+                                // The right child is smaller than the left child but not a prefix:
+                                // we can return all its sub-tree as right-only.
+                                right_children = &right_children[1..];
+
+                                let mut right_key_prefix = key_prefix.clone();
+                                right_key_prefix.extend_from_slice(&right_child_key.0);
+
+                                if right_key_prefix.len() == Key::KEY_USIZE {
+                                    let key = Key::from_slice(&right_key_prefix);
+                                    tracing::trace!(
+                                        "right-only: `{key:?}` => {right_child_blob_id}"
+                                    );
+
+                                    visitor(TreeDiff::RightOnly {
+                                        key,
+                                        value: right_child_blob_id.clone(),
+                                    })
+                                    .await;
+                                } else {
+                                    let mut right_key_prefix_path = key_prefix_path.clone();
+                                    right_key_prefix_path.push(right_child_key.clone());
+
+                                    let right = other.fetch_branch(right_child_blob_id).await?;
+                                    let stream = other.scan_branch(
+                                        right_key_prefix_path,
+                                        right_key_prefix,
+                                        right,
+                                    );
+
+                                    tokio::pin!(stream);
+
+                                    while let Some((key, value)) =
+                                        stream.next().await.transpose()?
+                                    {
+                                        tracing::trace!("right-only: `{key:?}` => {value}");
+                                        visitor(TreeDiff::RightOnly { key, value }).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    tracing::trace!(
+                        "children comparison complete: yielding potential remaining children..."
+                    );
+
+                    // The leftover children in the left tree are necessarily greater than the rightmost
+                    // children in the right tree branch: return all these children.
+                    for TreeItem(left_child_key, left_child_blob_id) in left_children {
+                        let mut left_key_prefix = key_prefix.clone();
+                        left_key_prefix.extend_from_slice(&left_child_key.0);
+
+                        if left_key_prefix.len() == Key::KEY_USIZE {
+                            let key = Key::from_slice(&left_key_prefix);
+                            tracing::trace!("left-only: `{key:?}` => {left_child_blob_id}");
+
+                            visitor(TreeDiff::LeftOnly {
+                                key,
+                                value: left_child_blob_id.clone(),
+                            })
+                            .await;
+                        } else {
+                            let mut left_key_prefix_path = key_prefix_path.clone();
+                            left_key_prefix_path.push(left_child_key.clone());
+
+                            let left = self.fetch_branch(left_child_blob_id).await?;
+                            let stream =
+                                self.scan_branch(left_key_prefix_path, left_key_prefix, left);
+
+                            tokio::pin!(stream);
+
+                            while let Some((key, value)) = stream.next().await.transpose()? {
+                                tracing::trace!("left-only: `{key:?}` => {value}");
+                                visitor(TreeDiff::LeftOnly { key, value }).await;
+                            }
+                        }
+                    }
+
+                    for TreeItem(right_child_key, right_child_blob_id) in right_children {
+                        let mut right_key_prefix = key_prefix.clone();
+                        right_key_prefix.extend_from_slice(&right_child_key.0);
+
+                        if right_key_prefix.len() == Key::KEY_USIZE {
+                            let key = Key::from_slice(&right_key_prefix);
+                            tracing::trace!("left-only: `{key:?}` => {right_child_blob_id}");
+
+                            visitor(TreeDiff::RightOnly {
+                                key,
+                                value: right_child_blob_id.clone(),
+                            })
+                            .await;
+                        } else {
+                            let mut right_key_prefix_path = key_prefix_path.clone();
+                            right_key_prefix_path.push(right_child_key.clone());
+
+                            let right = other.fetch_branch(right_child_blob_id).await?;
+                            let stream =
+                                other.scan_branch(right_key_prefix_path, right_key_prefix, right);
+
+                            tokio::pin!(stream);
+
+                            while let Some((key, value)) = stream.next().await.transpose()? {
+                                tracing::trace!("right-only: `{key:?}` => {value}");
+                                visitor(TreeDiff::RightOnly { key, value }).await;
+                            }
+                        }
+                    }
+                }
+                DiffStackItem::ShorterLeft(AsymmetricDiffStackItem {
+                    left_key_prefix_path,
+                    left_key_prefix,
+                    left,
+                    right_key_prefix_path,
+                    right_key_prefix,
+                    right,
+                }) => {
+                    let left_children = left.children.as_slice();
+
+                    while let Some(TreeItem(sub_key, sub_blob_id)) = left_children.first() {
+                        let mut sub_key_prefix = left_key_prefix.clone();
+                        sub_key_prefix.extend_from_slice(&sub_key.0);
+
+                        match sub_key_prefix.cmp(&right_key_prefix) {
+                            Ordering::Equal => {
+                                let left = self.fetch_branch(sub_blob_id).await?;
+
+                                stack.push_back(DiffStackItem::SamePrefix(SameSizeDiffStackItem {
+                                    key_prefix_path: right_key_prefix_path.clone(),
+                                    key_prefix: right_key_prefix.clone(),
+                                    left,
+                                    right,
+                                }));
+
+                                break;
+                            }
+                            Ordering::Less if right_key_prefix.starts_with(&sub_key_prefix) => {
+                                // The left sub-tree is still a prefix of the right sub-tree.
+                                let left = self.fetch_branch(sub_blob_id).await?;
+
+                                let mut sub_key_prefix_path = left_key_prefix_path.clone();
+                                sub_key_prefix_path.push(sub_key.clone());
+
+                                stack.push_back(DiffStackItem::ShorterLeft(
+                                    AsymmetricDiffStackItem {
+                                        left_key_prefix_path: sub_key_prefix_path,
+                                        left_key_prefix: sub_key_prefix,
+                                        left,
+                                        right_key_prefix_path,
+                                        right_key_prefix,
+                                        right,
+                                    },
+                                ));
+
+                                break;
+                            }
+                            Ordering::Less => {
+                                let mut sub_key_prefix_path = left_key_prefix_path.clone();
+                                sub_key_prefix_path.push(sub_key.clone());
+
+                                let left = self.fetch_branch(sub_blob_id).await?;
+                                let children =
+                                    self.scan_branch(sub_key_prefix_path, sub_key_prefix, left);
+
+                                tokio::pin!(children);
+
+                                while let Some((key, value)) = children.next().await.transpose()? {
+                                    tracing::trace!("left-only: `{key:?}` => {value}");
+                                    visitor(TreeDiff::LeftOnly { key, value }).await;
+                                }
+                            }
+                            Ordering::Greater => {
+                                let children = other.scan_branch(
+                                    right_key_prefix_path,
+                                    right_key_prefix,
+                                    right,
+                                );
+
+                                tokio::pin!(children);
+
+                                while let Some((key, value)) = children.next().await.transpose()? {
+                                    tracing::trace!("right-only: `{key:?}` => {value}");
+                                    visitor(TreeDiff::RightOnly { key, value }).await;
+                                }
+
+                                break;
+                            }
+                        }
+                    }
+
+                    // If we have any sub-children left, we must yield them as
+                    // left-only.
+                    for TreeItem(sub_key, sub_blob_id) in left_children {
+                        let mut sub_key_prefix = left_key_prefix.clone();
+                        sub_key_prefix.extend_from_slice(&sub_key.0);
+
+                        let key = Key::from_slice(&sub_key_prefix);
+                        tracing::trace!("left-only: `{key:?}` => {sub_blob_id}");
+                        visitor(TreeDiff::LeftOnly {
+                            key,
+                            value: sub_blob_id.clone(),
+                        })
+                        .await;
+                    }
+                }
+                DiffStackItem::ShorterRight(AsymmetricDiffStackItem {
+                    left_key_prefix_path,
+                    left_key_prefix,
+                    left,
+                    right_key_prefix_path,
+                    right_key_prefix,
+                    right,
+                }) => {
+                    let right_children = right.children.as_slice();
+
+                    while let Some(TreeItem(sub_key, sub_blob_id)) = right_children.first() {
+                        let mut sub_key_prefix = right_key_prefix.clone();
+                        sub_key_prefix.extend_from_slice(&sub_key.0);
+
+                        match sub_key_prefix.cmp(&left_key_prefix) {
+                            Ordering::Equal => {
+                                let right = other.fetch_branch(sub_blob_id).await?;
+
+                                stack.push_back(DiffStackItem::SamePrefix(SameSizeDiffStackItem {
+                                    key_prefix_path: left_key_prefix_path.clone(),
+                                    key_prefix: left_key_prefix.clone(),
+                                    left,
+                                    right,
+                                }));
+
+                                break;
+                            }
+                            Ordering::Less if left_key_prefix.starts_with(&sub_key_prefix) => {
+                                // The right sub-tree is still a prefix of the left sub-tree.
+                                let right = other.fetch_branch(sub_blob_id).await?;
+
+                                let mut sub_key_prefix_path = right_key_prefix_path.clone();
+                                sub_key_prefix_path.push(sub_key.clone());
+
+                                stack.push_back(DiffStackItem::ShorterRight(
+                                    AsymmetricDiffStackItem {
+                                        left_key_prefix_path,
+                                        left_key_prefix,
+                                        left,
+                                        right_key_prefix_path: sub_key_prefix_path,
+                                        right_key_prefix: sub_key_prefix,
+                                        right,
+                                    },
+                                ));
+
+                                break;
+                            }
+                            Ordering::Less => {
+                                let mut sub_key_prefix_path = right_key_prefix_path.clone();
+                                sub_key_prefix_path.push(sub_key.clone());
+
+                                let right = other.fetch_branch(sub_blob_id).await?;
+                                let children =
+                                    other.scan_branch(sub_key_prefix_path, sub_key_prefix, right);
+
+                                tokio::pin!(children);
+
+                                while let Some((key, value)) = children.next().await.transpose()? {
+                                    tracing::trace!("right-only: `{key:?}` => {value}");
+                                    visitor(TreeDiff::RightOnly { key, value }).await;
+                                }
+                            }
+                            Ordering::Greater => {
+                                let children =
+                                    self.scan_branch(left_key_prefix_path, left_key_prefix, left);
+
+                                tokio::pin!(children);
+
+                                while let Some((key, value)) = children.next().await.transpose()? {
+                                    tracing::trace!("left-only: `{key:?}` => {value}");
+                                    visitor(TreeDiff::LeftOnly { key, value }).await;
+                                }
+
+                                break;
+                            }
+                        }
+                    }
+
+                    // If we have any sub-children left, we must yield them as
+                    // right-only.
+                    for TreeItem(sub_key, sub_blob_id) in right_children {
+                        let mut sub_key_prefix = right_key_prefix.clone();
+                        sub_key_prefix.extend_from_slice(&sub_key.0);
+
+                        let key = Key::from_slice(&sub_key_prefix);
+                        tracing::trace!("right-only: `{key:?}` => {sub_blob_id}");
+                        visitor(TreeDiff::RightOnly {
+                            key,
+                            value: sub_blob_id.clone(),
+                        })
+                        .await;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// A visit result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisitResult {
+    /// Continue visiting the tree.
+    Continue,
+    /// Stop visiting the tree.
+    Stop,
+}
+
+enum DiffStackItem {
+    SamePrefix(SameSizeDiffStackItem),
+    ShorterLeft(AsymmetricDiffStackItem),
+    ShorterRight(AsymmetricDiffStackItem),
+}
+
+struct SameSizeDiffStackItem {
+    key_prefix_path: TreePath,
+    key_prefix: BytesMut,
+    left: Arc<TreeBranch>,
+    right: Arc<TreeBranch>,
+}
+
+struct AsymmetricDiffStackItem {
+    left_key_prefix_path: TreePath,
+    left_key_prefix: BytesMut,
+    left: Arc<TreeBranch>,
+    right_key_prefix_path: TreePath,
+    right_key_prefix: BytesMut,
+    right: Arc<TreeBranch>,
 }
 
 #[cfg(test)]
@@ -868,13 +1500,11 @@ mod tests {
     #[tokio::test]
     async fn test_fixed_size_index() {
         let client = Client::new_for_tests();
-        let tx = client.start_transaction().unwrap();
+        let tx = client.start_transaction("tx1").unwrap();
 
-        assert_transaction_empty!(tx);
+        let mut index = FixedSizeIndex::<u16>::new(tx);
 
-        let mut index = FixedSizeIndex::<'_, u16>::initialize(&tx).await.unwrap();
-
-        assert_transaction_empty!(tx);
+        assert_transaction_empty!(index);
 
         let initial_root_id = index.save().await.unwrap();
 
@@ -947,7 +1577,7 @@ mod tests {
         assert_empty!(index);
         assert_total_size!(index, 0);
 
-        assert_transaction_empty!(tx);
+        assert_transaction_empty!(index);
 
         let final_root_id = index.save().await.unwrap();
         assert_eq!(initial_root_id, final_root_id);
@@ -957,15 +1587,13 @@ mod tests {
     #[tokio::test]
     async fn test_fixed_size_index_populated() {
         let client = Client::new_for_tests();
-        let tx = client.start_transaction().unwrap();
+        let tx = client.start_transaction("tx1").unwrap();
 
-        assert_transaction_empty!(tx);
-
-        let mut index = FixedSizeIndex::<'_, u64>::initialize(&tx).await.unwrap();
+        let mut index = FixedSizeIndex::<u64>::new(tx);
 
         index.set_balancing_parameters(4, 256).unwrap();
 
-        assert_transaction_empty!(tx);
+        assert_transaction_empty!(index);
 
         // Insert 1024 values in the tree to trigger actual transaction writing as well as
         // rebalancing.
@@ -981,7 +1609,7 @@ mod tests {
         // same children, hence only one actual reference (saving 75% of the space).
         //
         // So the root node + the sub-node makes 2 total references.
-        assert_transaction_references_count!(tx, 2);
+        assert_transaction_references_count!(index, 2);
 
         for i in 0..1024 {
             assert_insert_update!(
@@ -992,17 +1620,17 @@ mod tests {
             );
         }
 
-        assert_transaction_references_count!(tx, 2);
+        assert_transaction_references_count!(index, 2);
 
         for i in 0..1024 {
             assert_remove_exists!(index, i, "this is a new value which is also rather large");
         }
 
-        assert_transaction_empty!(tx);
+        assert_transaction_empty!(index);
         assert_empty!(index);
         assert_total_size!(index, 0);
 
-        assert_transaction_empty!(tx);
+        assert_transaction_empty!(index);
     }
 
     #[test]
@@ -1043,15 +1671,13 @@ mod tests {
     #[tokio::test]
     async fn test_fixed_size_index_scan() {
         let client = Client::new_for_tests();
-        let tx = client.start_transaction().unwrap();
+        let tx = client.start_transaction("tx1").unwrap();
 
-        assert_transaction_empty!(tx);
-
-        let mut index = FixedSizeIndex::<'_, u64>::initialize(&tx).await.unwrap();
+        let mut index = FixedSizeIndex::<u64>::new(tx);
 
         index.set_balancing_parameters(4, 256).unwrap();
 
-        assert_transaction_empty!(tx);
+        assert_transaction_empty!(index);
 
         let all: Vec<_> = index.scan().try_collect().await.unwrap();
         assert_eq!(all, vec![]);
@@ -1076,5 +1702,143 @@ mod tests {
                 ))
                 .collect::<Vec<_>>()
         );
+    }
+
+    async fn collect_diff<Key: FixedSizeKey + Send + Sync + std::fmt::Debug>(
+        left: &FixedSizeIndex<Key>,
+        right: &FixedSizeIndex<Key>,
+    ) -> Vec<TreeDiff<Key>> {
+        let results = tokio::sync::Mutex::new(Vec::with_capacity(4));
+
+        left.visit_differences(right, |diff| {
+            Box::pin(async {
+                results.lock().await.push(diff);
+
+                VisitResult::Continue
+            })
+        })
+        .await
+        .unwrap();
+
+        results.into_inner()
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_fixed_size_index_diff() {
+        let client = Client::new_for_tests();
+        let tx = client.start_transaction("tx1").unwrap();
+
+        let mut index = FixedSizeIndex::<u64>::new(tx);
+
+        index.set_balancing_parameters(4, 256).unwrap();
+
+        assert_transaction_empty!(index);
+
+        // Make sure a diff with ourselves yields no result.
+        let diffs: Vec<_> = collect_diff(&index, &index).await;
+        assert_eq!(diffs, vec![]);
+
+        // Insert 1023 values in the tree to trigger actual transaction writing as well as
+        // rebalancing.
+        for i in 1..1024 {
+            assert_insert_new!(index, i, "value");
+        }
+
+        // Make sure a diff with ourselves yields no result.
+        let diffs: Vec<_> = collect_diff(&index, &index).await;
+        assert_eq!(diffs, vec![]);
+
+        {
+            let mut index2 = index.fork("tx2").await;
+
+            assert_insert_new!(index2, 0, "new-value");
+            assert_insert_update!(index2, 16, "other-value", "value");
+            assert_remove_exists!(index2, 128, "value");
+
+            let diffs: Vec<_> = collect_diff(&index, &index2).await;
+            assert_eq!(
+                diffs,
+                vec![
+                    TreeDiff::RightOnly {
+                        key: 0,
+                        value: blob_id!("new-value")
+                    },
+                    TreeDiff::LeftOnly {
+                        key: 16,
+                        value: blob_id!("value")
+                    },
+                    TreeDiff::RightOnly {
+                        key: 16,
+                        value: blob_id!("other-value")
+                    },
+                    TreeDiff::LeftOnly {
+                        key: 128,
+                        value: blob_id!("value")
+                    },
+                ]
+            );
+
+            let diffs: Vec<_> = collect_diff(&index2, &index).await;
+            assert_eq!(
+                diffs,
+                vec![
+                    TreeDiff::LeftOnly {
+                        key: 0,
+                        value: blob_id!("new-value")
+                    },
+                    TreeDiff::LeftOnly {
+                        key: 16,
+                        value: blob_id!("other-value")
+                    },
+                    TreeDiff::RightOnly {
+                        key: 16,
+                        value: blob_id!("value")
+                    },
+                    TreeDiff::RightOnly {
+                        key: 128,
+                        value: blob_id!("value")
+                    },
+                ]
+            );
+        }
+
+        #[cfg(not(test))]
+        {
+            let mut index3 = FixedSizeIndex::<u64>::new(index.transaction().fork("tx3").await);
+
+            index3.set_balancing_parameters(1, 4).unwrap();
+
+            for i in 1..1024 {
+                assert_insert_new!(index3, i, "value");
+            }
+
+            assert_insert_new!(index3, 0, "new-value");
+            assert_insert_update!(index3, 16, "other-value", "value");
+            assert_remove_exists!(index3, 128, "value");
+
+            let diffs: Vec<_> = collect_diff(&index, &index3).await;
+            assert_eq!(
+                diffs,
+                vec![
+                    TreeDiff::RightOnly {
+                        key: 0,
+                        value: blob_id!("new-value")
+                    },
+                    TreeDiff::LeftOnly {
+                        key: 16,
+                        value: blob_id!("value")
+                    },
+                    TreeDiff::RightOnly {
+                        key: 16,
+                        value: blob_id!("other-value")
+                    },
+                    TreeDiff::LeftOnly {
+                        key: 128,
+                        value: blob_id!("value")
+                    },
+                ]
+            );
+        }
     }
 }

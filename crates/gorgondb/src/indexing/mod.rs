@@ -126,16 +126,17 @@ pub(super) mod tests {
     }
 
     macro_rules! assert_transaction_empty {
-        ($tx:ident) => {
-            let blobs: std::collections::HashSet<_> = $tx.get_blobs().await.collect();
+        ($index:ident) => {
+            let blobs: std::collections::HashSet<_> =
+                $index.transaction().get_blobs().await.collect();
 
             assert_eq!(blobs, Default::default());
         };
     }
 
     macro_rules! assert_transaction_references_count {
-        ($tx:ident, $cnt:expr) => {
-            let blobs: Vec<_> = $tx.get_blobs().await.collect();
+        ($index:ident, $cnt:expr) => {
+            let blobs: Vec<_> = $index.transaction().get_blobs().await.collect();
 
             assert_eq!(blobs.len(), $cnt);
         };

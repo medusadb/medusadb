@@ -329,6 +329,17 @@ impl SizedKeyElement for BinaryTreePathElement {
     }
 }
 
+impl BinaryTreePathElement {
+    /// Check wether the binary path element has the specified prefix.
+    pub fn has_prefix(&self, other: &Self) -> bool {
+        if other.0.len() > self.0.len() {
+            return false;
+        }
+
+        self.0[0..other.0.len()] == other.0
+    }
+}
+
 /// A search stack.
 #[derive(Debug, Clone)]
 pub struct TreeSearchStack<KeyElem, Meta>(Vec<(Arc<TreeBranch<KeyElem, Meta>>, KeyElem)>);
@@ -427,6 +438,7 @@ pub enum TreeSearchResult<KeyElem, Meta> {
 }
 
 /// Represents a tree difference.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TreeDiff<Key> {
     /// The key is only present on the left tree.
     LeftOnly { key: Key, value: BlobId },

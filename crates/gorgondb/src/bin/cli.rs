@@ -147,9 +147,9 @@ async fn main() -> anyhow::Result<()> {
                         )
                         .await?;
 
-                    let tx = client.start_transaction()?;
+                    let tx = client.start_transaction("tx1")?;
 
-                    let mut index = FixedSizeIndex::<'_, u64>::initialize(&tx).await?;
+                    let mut index = FixedSizeIndex::<u64>::new(tx);
 
                     index.set_balancing_parameters(min_count, max_count)?;
 

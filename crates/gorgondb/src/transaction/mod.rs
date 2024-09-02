@@ -6,6 +6,8 @@ use std::{
     sync::Arc,
 };
 
+use tracing::trace;
+
 use crate::{
     gorgon::{Error, Result, StoreOptions},
     AsyncFileSource, AsyncSource, BlobId, Gorgon,
@@ -28,16 +30,34 @@ impl Transaction {
     const DISK_THRESHOLD: u64 = 1024 * 1024;
 
     pub(crate) fn new(
+        name: impl Into<Cow<'static, str>>,
         gorgon: Gorgon,
         base_storage: Arc<crate::storage::Storage>,
     ) -> std::io::Result<Self> {
         let storage = Storage::new(
+            name,
             Self::DISK_THRESHOLD,
             gorgon.filesystem().clone(),
             base_storage,
         )?;
 
         Ok(Self { gorgon, storage })
+    }
+
+    /// Fork the transaction, duplicating its uncommited content in memory.
+    ///
+    /// The resulting transaction is exactly identical to the initial one, but the two are
+    /// independant after the fork.
+    pub async fn fork(&self, name: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            gorgon: self.gorgon.clone(),
+            storage: self.storage.fork(name).await,
+        }
+    }
+
+    /// Get the name of the transaction.
+    pub fn name(&self) -> &str {
+        self.storage.name()
     }
 
     /// Get the blobs referenced by this transaction.
@@ -109,7 +129,14 @@ impl Transaction {
     ) -> Result<BlobId> {
         let source = source.into();
 
-        self.gorgon.store_in(&self.storage, source, options).await
+        let blob_id = self.gorgon.store_in(&self.storage, source, options).await?;
+
+        trace!(
+            "Stored blob `{blob_id}` to transaction `{}`.",
+            self.storage.name()
+        );
+
+        Ok(blob_id)
     }
 
     /// Unstore a value.
@@ -119,6 +146,11 @@ impl Transaction {
     ///
     /// Unstoring a value that wasn't stored is a no-op.
     pub async fn unstore(&self, blob_id: &BlobId) -> Result<()> {
+        trace!(
+            "Unstored blob `{blob_id}` from transaction `{}`.",
+            self.storage.name()
+        );
+
         self.gorgon.unstore_from(&self.storage, blob_id).await
     }
 
@@ -175,8 +207,8 @@ mod tests {
         assert_eq!(buf, TEST_BUFFER_A);
 
         // Start two different transactions.
-        let transaction_one = client.start_transaction().unwrap();
-        let transaction_two = client.start_transaction().unwrap();
+        let transaction_one = client.start_transaction("tx1").unwrap();
+        let transaction_two = client.start_transaction("tx2").unwrap();
 
         // We write buffer B to the transaction one, twice.
         //

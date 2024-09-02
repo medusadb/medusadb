@@ -37,7 +37,7 @@ impl Default for Filesystem {
 impl Filesystem {
     /// Instantiate a new filesystem storage at the specified location.
     pub fn new_storage(&self, root: impl Into<PathBuf>) -> std::io::Result<FilesystemStorage> {
-        FilesystemStorage::new(self.clone(), root)
+        FilesystemStorage::new(self.clone(), root.into())
     }
 
     /// Instantiate a new filesystem storage suitable for caching.
@@ -110,6 +110,7 @@ impl Filesystem {
 
         match tokio::fs::File::options()
             .create(true)
+            .truncate(true)
             .write(true)
             .open(&path)
             .await

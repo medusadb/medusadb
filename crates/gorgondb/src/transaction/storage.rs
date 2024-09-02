@@ -1,8 +1,8 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use tempfile::TempDir;
 use tokio::sync::RwLock;
+use tracing::{debug, trace};
 
 use crate::{
     gorgon::{Retrieve, Store, Unstore},
@@ -13,29 +13,58 @@ use crate::{
 // An in-memory/on-disk local storage for transactions.
 #[derive(Debug)]
 pub(crate) struct Storage {
+    name: Cow<'static, str>,
     disk_size_threshold: u64,
     remote_refs: RwLock<HashMap<RemoteRef, RefCountedBlob>>,
     filesystem_storage: FilesystemStorage,
-    _filesystem_root: TempDir, // Keep the folder alive.
     base_storage: Arc<crate::Storage>,
 }
 
 impl Storage {
     pub(crate) fn new(
+        name: impl Into<Cow<'static, str>>,
         disk_size_threshold: u64,
         filesystem: Filesystem,
         base_storage: Arc<crate::Storage>,
     ) -> std::io::Result<Self> {
-        let _filesystem_root = tempfile::TempDir::new()?;
-        let filesystem_storage = FilesystemStorage::new(filesystem, _filesystem_root.path())?;
+        let filesystem_storage = FilesystemStorage::new_temporary(filesystem)?;
+        let name = name.into();
 
         Ok(Self {
+            name,
             disk_size_threshold,
             remote_refs: Default::default(),
             filesystem_storage,
-            _filesystem_root,
             base_storage,
         })
+    }
+
+    /// Get the name of the transaction storage.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Fork the storage, duplicating its content in memory.
+    ///
+    /// The resulting transaction is exactly identical to the initial one, but the two are
+    /// independant after the fork.
+    pub async fn fork(&self, name: impl Into<Cow<'static, str>>) -> Self {
+        let name = name.into();
+        let remote_refs = self.remote_refs.read().await.clone();
+
+        debug!(
+            "Forked transaction storage `{}` to `{name}` with {} remote ref(s).",
+            self.name,
+            remote_refs.len()
+        );
+
+        Self {
+            name,
+            disk_size_threshold: self.disk_size_threshold,
+            remote_refs: RwLock::new(remote_refs),
+            filesystem_storage: self.filesystem_storage.clone(),
+            base_storage: self.base_storage.clone(),
+        }
     }
 
     /// Get the reference remote refs.
@@ -60,10 +89,10 @@ impl Storage {
             } {
                 // Make sure we add back to to blobs the non-handled ones.
                 return Err((Self{
+                    name: self.name,
                     disk_size_threshold: self.disk_size_threshold,
                     remote_refs: RwLock::new(std::iter::once((remote_ref, ref_counted_blob)).chain(blobs_iter).collect()),
                     filesystem_storage: self.filesystem_storage,
-                    _filesystem_root: self._filesystem_root,
                     base_storage: self.base_storage,
                 }, err))
             }
@@ -83,7 +112,15 @@ impl Store for Storage {
         match self.remote_refs.write().await.entry(remote_ref.clone()) {
             std::collections::hash_map::Entry::Occupied(entry) => {
                 // The entry exists already: just increment the reference count.
-                entry.into_mut().count += 1;
+                let entry = entry.into_mut();
+
+                entry.count += 1;
+
+                trace!(
+                    "Incremented reference count of `{remote_ref}` to {} in transaction storage `{}`",
+                    entry.count,
+                    self.name
+                );
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let data = if source.size() > self.disk_size_threshold {
@@ -95,6 +132,11 @@ impl Store for Storage {
                 };
 
                 entry.insert(RefCountedBlob::new(data));
+
+                trace!(
+                    "Added new reference to `{remote_ref}` in transaction storage `{}`",
+                    self.name
+                );
             }
         };
 
@@ -141,14 +183,28 @@ impl Unstore for Storage {
             // entirely.
             if entry.get().is_last_ref() {
                 entry.remove();
+
+                trace!(
+                    "Removed last reference to `{remote_ref}` from transaction storage `{}`",
+                    self.name
+                );
             } else {
-                entry.into_mut().count -= 1;
+                let entry = entry.into_mut();
+
+                entry.count -= 1;
+
+                trace!("Decremented reference count to `{remote_ref}` to {} in transaction storage `{}`", entry.count, self.name);
             }
+        } else {
+            trace!(
+                    "No existing reference to `{remote_ref}` in transaction storage `{}`: nothing to unstore.",
+                    self.name
+                );
         }
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct RefCountedBlob {
     count: u32,
     data: Option<Cow<'static, [u8]>>,
