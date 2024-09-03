@@ -442,8 +442,10 @@ pub enum TreeSearchResult<KeyElem, Meta> {
 pub enum TreeDiff<Key> {
     /// The key is only present on the left tree.
     LeftOnly { key: Key, value: BlobId },
+
     /// The key is only present on the right tree.
     RightOnly { key: Key, value: BlobId },
+
     /// The key exists in both trees with a different value.
     Diff {
         key: Key,

@@ -1,5 +1,6 @@
 use async_stream::try_stream;
 use std::cmp::Ordering;
+use std::future::Future;
 use std::{
     borrow::Cow,
     collections::VecDeque,
@@ -905,7 +906,8 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
     pub async fn visit_differences<'s>(
         &'s self,
         other: &'s Self,
-        visitor: impl Fn(TreeDiff<Key>) -> BoxFuture<'s, VisitResult> + 's,
+        options: DiffOptions,
+        visitor: impl Visitor<'s, Key>,
     ) -> Result<()> {
         let mut stack = VecDeque::new();
 
@@ -933,27 +935,45 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                     "comparing an non-empty index `{branch_id}` with an empty index: yielding all values..."
                 );
 
-                let stream = self.scan_root(branch_id);
+                if options.wants_left() {
+                    let stream = self.scan_root(branch_id);
 
-                tokio::pin!(stream);
+                    tokio::pin!(stream);
 
-                while let Some(item) = stream.next().await {
-                    let (key, value) = item?;
-                    tracing::trace!("left-only: `{key:?}` => {value}");
-                    visitor(TreeDiff::LeftOnly { key, value }).await;
+                    while let Some(item) = stream.next().await {
+                        let (key, value) = item?;
+                        tracing::trace!("left-only: `{key:?}` => {value}");
+
+                        if visitor
+                            .call(TreeDiff::LeftOnly { key, value })
+                            .await
+                            .is_stop()
+                        {
+                            return Ok(());
+                        }
+                    }
                 }
             }
             (None, Some(other_branch_id)) => {
                 tracing::debug!("comparing an empty index to a non-empty index `{other_branch_id}`: yielding all other values...");
 
-                let stream = self.scan_root(other_branch_id);
+                if options.wants_right() {
+                    let stream = self.scan_root(other_branch_id);
 
-                tokio::pin!(stream);
+                    tokio::pin!(stream);
 
-                while let Some(item) = stream.next().await {
-                    let (key, value) = item?;
-                    tracing::trace!("right-only: `{key:?}` => {value}");
-                    visitor(TreeDiff::RightOnly { key, value }).await;
+                    while let Some(item) = stream.next().await {
+                        let (key, value) = item?;
+                        tracing::trace!("right-only: `{key:?}` => {value}");
+
+                        if visitor
+                            .call(TreeDiff::RightOnly { key, value })
+                            .await
+                            .is_stop()
+                        {
+                            return Ok(());
+                        }
+                    }
                 }
             }
         };
@@ -965,13 +985,22 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                     key_prefix,
                     branch,
                 }) => {
-                    let stream = self.scan_branch(key_prefix_path, key_prefix, branch);
+                    if options.wants_left() {
+                        let stream = self.scan_branch(key_prefix_path, key_prefix, branch);
 
-                    tokio::pin!(stream);
+                        tokio::pin!(stream);
 
-                    while let Some((key, value)) = stream.next().await.transpose()? {
-                        tracing::trace!("left-only: `{key:?}` => {value}");
-                        visitor(TreeDiff::LeftOnly { key, value }).await;
+                        while let Some((key, value)) = stream.next().await.transpose()? {
+                            tracing::trace!("left-only: `{key:?}` => {value}");
+
+                            if visitor
+                                .call(TreeDiff::LeftOnly { key, value })
+                                .await
+                                .is_stop()
+                            {
+                                return Ok(());
+                            }
+                        }
                     }
                 }
                 DiffStackItem::OnlyRight(SingleDiffStackItem {
@@ -979,13 +1008,22 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                     key_prefix,
                     branch,
                 }) => {
-                    let stream = other.scan_branch(key_prefix_path, key_prefix, branch);
+                    if options.wants_right() {
+                        let stream = other.scan_branch(key_prefix_path, key_prefix, branch);
 
-                    tokio::pin!(stream);
+                        tokio::pin!(stream);
 
-                    while let Some((key, value)) = stream.next().await.transpose()? {
-                        tracing::trace!("right-only: `{key:?}` => {value}");
-                        visitor(TreeDiff::RightOnly { key, value }).await;
+                        while let Some((key, value)) = stream.next().await.transpose()? {
+                            tracing::trace!("right-only: `{key:?}` => {value}");
+
+                            if visitor
+                                .call(TreeDiff::RightOnly { key, value })
+                                .await
+                                .is_stop()
+                            {
+                                return Ok(());
+                            }
+                        }
                     }
                 }
                 DiffStackItem::SamePrefix(SameSizeDiffStackItem {
@@ -1036,24 +1074,58 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
 
                                 if sub_key_prefix.len() == Key::KEY_USIZE {
                                     let key = Key::from_slice(&sub_key_prefix);
-                                    tracing::trace!("left-only: `{key:?}` => {left_child_blob_id}");
 
-                                    visitor(TreeDiff::LeftOnly {
-                                        key,
-                                        value: left_child_blob_id.clone(),
-                                    })
-                                    .await;
+                                    match options {
+                                        DiffOptions::Symmetric => {
+                                            tracing::trace!(
+                                                "symmetric difference: `{key:?}` => {left_child_blob_id} != {right_child_blob_id}"
+                                            );
 
-                                    let key = Key::from_slice(&sub_key_prefix);
-                                    tracing::trace!(
-                                        "right-only: `{key:?}` => {right_child_blob_id}"
-                                    );
+                                            if visitor
+                                                .call(TreeDiff::Diff {
+                                                    key,
+                                                    left: left_child_blob_id.clone(),
+                                                    right: right_child_blob_id.clone(),
+                                                })
+                                                .await
+                                                .is_stop()
+                                            {
+                                                return Ok(());
+                                            }
+                                        }
+                                        DiffOptions::LeftOnly => {
+                                            tracing::trace!(
+                                                "left-only: `{key:?}` => {left_child_blob_id}"
+                                            );
 
-                                    visitor(TreeDiff::RightOnly {
-                                        key,
-                                        value: right_child_blob_id.clone(),
-                                    })
-                                    .await;
+                                            if visitor
+                                                .call(TreeDiff::LeftOnly {
+                                                    key,
+                                                    value: left_child_blob_id.clone(),
+                                                })
+                                                .await
+                                                .is_stop()
+                                            {
+                                                return Ok(());
+                                            }
+                                        }
+                                        DiffOptions::RightOnly => {
+                                            tracing::trace!(
+                                                "right-only: `{key:?}` => {right_child_blob_id}"
+                                            );
+
+                                            if visitor
+                                                .call(TreeDiff::RightOnly {
+                                                    key,
+                                                    value: right_child_blob_id.clone(),
+                                                })
+                                                .await
+                                                .is_stop()
+                                            {
+                                                return Ok(());
+                                            }
+                                        }
+                                    };
                                 } else {
                                     let mut sub_key_prefix_path = key_prefix_path.clone();
                                     sub_key_prefix_path.push(left_child_key.clone());
@@ -1154,36 +1226,51 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
 
                                 left_children = &left_children[1..];
 
-                                let mut left_key_prefix = key_prefix.clone();
-                                left_key_prefix.extend_from_slice(&left_child_key.0);
+                                if options.wants_left() {
+                                    let mut left_key_prefix = key_prefix.clone();
+                                    left_key_prefix.extend_from_slice(&left_child_key.0);
 
-                                if left_key_prefix.len() == Key::KEY_USIZE {
-                                    let key = Key::from_slice(&left_key_prefix);
-                                    tracing::trace!("left-only: `{key:?}` => {left_child_blob_id}");
+                                    if left_key_prefix.len() == Key::KEY_USIZE {
+                                        let key = Key::from_slice(&left_key_prefix);
+                                        tracing::trace!(
+                                            "left-only: `{key:?}` => {left_child_blob_id}"
+                                        );
 
-                                    visitor(TreeDiff::LeftOnly {
-                                        key,
-                                        value: left_child_blob_id.clone(),
-                                    })
-                                    .await;
-                                } else {
-                                    let mut left_key_prefix_path = key_prefix_path.clone();
-                                    left_key_prefix_path.push(left_child_key.clone());
+                                        if visitor
+                                            .call(TreeDiff::LeftOnly {
+                                                key,
+                                                value: left_child_blob_id.clone(),
+                                            })
+                                            .await
+                                            .is_stop()
+                                        {
+                                            return Ok(());
+                                        }
+                                    } else {
+                                        let mut left_key_prefix_path = key_prefix_path.clone();
+                                        left_key_prefix_path.push(left_child_key.clone());
 
-                                    let left = self.fetch_branch(left_child_blob_id).await?;
-                                    let stream = self.scan_branch(
-                                        left_key_prefix_path,
-                                        left_key_prefix,
-                                        left,
-                                    );
+                                        let left = self.fetch_branch(left_child_blob_id).await?;
+                                        let stream = self.scan_branch(
+                                            left_key_prefix_path,
+                                            left_key_prefix,
+                                            left,
+                                        );
 
-                                    tokio::pin!(stream);
+                                        tokio::pin!(stream);
 
-                                    while let Some((key, value)) =
-                                        stream.next().await.transpose()?
-                                    {
-                                        tracing::trace!("left-only: `{key:?}` => {value}");
-                                        visitor(TreeDiff::LeftOnly { key, value }).await;
+                                        while let Some((key, value)) =
+                                            stream.next().await.transpose()?
+                                        {
+                                            tracing::trace!("left-only: `{key:?}` => {value}");
+                                            if visitor
+                                                .call(TreeDiff::LeftOnly { key, value })
+                                                .await
+                                                .is_stop()
+                                            {
+                                                return Ok(());
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1267,38 +1354,51 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
 
                                 right_children = &right_children[1..];
 
-                                let mut right_key_prefix = key_prefix.clone();
-                                right_key_prefix.extend_from_slice(&right_child_key.0);
+                                if options.wants_right() {
+                                    let mut right_key_prefix = key_prefix.clone();
+                                    right_key_prefix.extend_from_slice(&right_child_key.0);
 
-                                if right_key_prefix.len() == Key::KEY_USIZE {
-                                    let key = Key::from_slice(&right_key_prefix);
-                                    tracing::trace!(
-                                        "right-only: `{key:?}` => {right_child_blob_id}"
-                                    );
+                                    if right_key_prefix.len() == Key::KEY_USIZE {
+                                        let key = Key::from_slice(&right_key_prefix);
+                                        tracing::trace!(
+                                            "right-only: `{key:?}` => {right_child_blob_id}"
+                                        );
 
-                                    visitor(TreeDiff::RightOnly {
-                                        key,
-                                        value: right_child_blob_id.clone(),
-                                    })
-                                    .await;
-                                } else {
-                                    let mut right_key_prefix_path = key_prefix_path.clone();
-                                    right_key_prefix_path.push(right_child_key.clone());
+                                        if visitor
+                                            .call(TreeDiff::RightOnly {
+                                                key,
+                                                value: right_child_blob_id.clone(),
+                                            })
+                                            .await
+                                            .is_stop()
+                                        {
+                                            return Ok(());
+                                        }
+                                    } else {
+                                        let mut right_key_prefix_path = key_prefix_path.clone();
+                                        right_key_prefix_path.push(right_child_key.clone());
 
-                                    let right = other.fetch_branch(right_child_blob_id).await?;
-                                    let stream = other.scan_branch(
-                                        right_key_prefix_path,
-                                        right_key_prefix,
-                                        right,
-                                    );
+                                        let right = other.fetch_branch(right_child_blob_id).await?;
+                                        let stream = other.scan_branch(
+                                            right_key_prefix_path,
+                                            right_key_prefix,
+                                            right,
+                                        );
 
-                                    tokio::pin!(stream);
+                                        tokio::pin!(stream);
 
-                                    while let Some((key, value)) =
-                                        stream.next().await.transpose()?
-                                    {
-                                        tracing::trace!("right-only: `{key:?}` => {value}");
-                                        visitor(TreeDiff::RightOnly { key, value }).await;
+                                        while let Some((key, value)) =
+                                            stream.next().await.transpose()?
+                                        {
+                                            tracing::trace!("right-only: `{key:?}` => {value}");
+                                            if visitor
+                                                .call(TreeDiff::RightOnly { key, value })
+                                                .await
+                                                .is_stop()
+                                            {
+                                                return Ok(());
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1309,64 +1409,95 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                         "same prefix children comparison complete: yielding potential remaining children..."
                     );
 
-                    // The leftover children in the left tree are necessarily greater than the rightmost
-                    // children in the right tree branch: return all these children.
-                    for TreeItem(left_child_key, left_child_blob_id) in left_children {
-                        let mut left_key_prefix = key_prefix.clone();
-                        left_key_prefix.extend_from_slice(&left_child_key.0);
+                    if options.wants_left() {
+                        // The leftover children in the left tree are necessarily greater than the rightmost
+                        // children in the right tree branch: return all these children.
+                        for TreeItem(left_child_key, left_child_blob_id) in left_children {
+                            let mut left_key_prefix = key_prefix.clone();
+                            left_key_prefix.extend_from_slice(&left_child_key.0);
 
-                        if left_key_prefix.len() == Key::KEY_USIZE {
-                            let key = Key::from_slice(&left_key_prefix);
-                            tracing::trace!("left-only: `{key:?}` => {left_child_blob_id}");
+                            if left_key_prefix.len() == Key::KEY_USIZE {
+                                let key = Key::from_slice(&left_key_prefix);
+                                tracing::trace!("left-only: `{key:?}` => {left_child_blob_id}");
 
-                            visitor(TreeDiff::LeftOnly {
-                                key,
-                                value: left_child_blob_id.clone(),
-                            })
-                            .await;
-                        } else {
-                            let mut left_key_prefix_path = key_prefix_path.clone();
-                            left_key_prefix_path.push(left_child_key.clone());
+                                if visitor
+                                    .call(TreeDiff::LeftOnly {
+                                        key,
+                                        value: left_child_blob_id.clone(),
+                                    })
+                                    .await
+                                    .is_stop()
+                                {
+                                    return Ok(());
+                                }
+                            } else {
+                                let mut left_key_prefix_path = key_prefix_path.clone();
+                                left_key_prefix_path.push(left_child_key.clone());
 
-                            let left = self.fetch_branch(left_child_blob_id).await?;
-                            let stream =
-                                self.scan_branch(left_key_prefix_path, left_key_prefix, left);
+                                let left = self.fetch_branch(left_child_blob_id).await?;
+                                let stream =
+                                    self.scan_branch(left_key_prefix_path, left_key_prefix, left);
 
-                            tokio::pin!(stream);
+                                tokio::pin!(stream);
 
-                            while let Some((key, value)) = stream.next().await.transpose()? {
-                                tracing::trace!("left-only: `{key:?}` => {value}");
-                                visitor(TreeDiff::LeftOnly { key, value }).await;
+                                while let Some((key, value)) = stream.next().await.transpose()? {
+                                    tracing::trace!("left-only: `{key:?}` => {value}");
+
+                                    if visitor
+                                        .call(TreeDiff::LeftOnly { key, value })
+                                        .await
+                                        .is_stop()
+                                    {
+                                        return Ok(());
+                                    }
+                                }
                             }
                         }
                     }
 
-                    for TreeItem(right_child_key, right_child_blob_id) in right_children {
-                        let mut right_key_prefix = key_prefix.clone();
-                        right_key_prefix.extend_from_slice(&right_child_key.0);
+                    if options.wants_right() {
+                        for TreeItem(right_child_key, right_child_blob_id) in right_children {
+                            let mut right_key_prefix = key_prefix.clone();
+                            right_key_prefix.extend_from_slice(&right_child_key.0);
 
-                        if right_key_prefix.len() == Key::KEY_USIZE {
-                            let key = Key::from_slice(&right_key_prefix);
-                            tracing::trace!("left-only: `{key:?}` => {right_child_blob_id}");
+                            if right_key_prefix.len() == Key::KEY_USIZE {
+                                let key = Key::from_slice(&right_key_prefix);
+                                tracing::trace!("left-only: `{key:?}` => {right_child_blob_id}");
 
-                            visitor(TreeDiff::RightOnly {
-                                key,
-                                value: right_child_blob_id.clone(),
-                            })
-                            .await;
-                        } else {
-                            let mut right_key_prefix_path = key_prefix_path.clone();
-                            right_key_prefix_path.push(right_child_key.clone());
+                                if visitor
+                                    .call(TreeDiff::RightOnly {
+                                        key,
+                                        value: right_child_blob_id.clone(),
+                                    })
+                                    .await
+                                    .is_stop()
+                                {
+                                    return Ok(());
+                                }
+                            } else {
+                                let mut right_key_prefix_path = key_prefix_path.clone();
+                                right_key_prefix_path.push(right_child_key.clone());
 
-                            let right = other.fetch_branch(right_child_blob_id).await?;
-                            let stream =
-                                other.scan_branch(right_key_prefix_path, right_key_prefix, right);
+                                let right = other.fetch_branch(right_child_blob_id).await?;
+                                let stream = other.scan_branch(
+                                    right_key_prefix_path,
+                                    right_key_prefix,
+                                    right,
+                                );
 
-                            tokio::pin!(stream);
+                                tokio::pin!(stream);
 
-                            while let Some((key, value)) = stream.next().await.transpose()? {
-                                tracing::trace!("right-only: `{key:?}` => {value}");
-                                visitor(TreeDiff::RightOnly { key, value }).await;
+                                while let Some((key, value)) = stream.next().await.transpose()? {
+                                    tracing::trace!("right-only: `{key:?}` => {value}");
+
+                                    if visitor
+                                        .call(TreeDiff::RightOnly { key, value })
+                                        .await
+                                        .is_stop()
+                                    {
+                                        return Ok(());
+                                    }
+                                }
                             }
                         }
                     }
@@ -1434,18 +1565,29 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                                     }
                                 };
 
-                                let mut sub_key_prefix_path = left_key_prefix_path.clone();
-                                sub_key_prefix_path.push(sub_key.clone());
+                                if options.wants_left() {
+                                    let mut sub_key_prefix_path = left_key_prefix_path.clone();
+                                    sub_key_prefix_path.push(sub_key.clone());
 
-                                let left = self.fetch_branch(sub_blob_id).await?;
-                                let children =
-                                    self.scan_branch(sub_key_prefix_path, sub_key_prefix, left);
+                                    let left = self.fetch_branch(sub_blob_id).await?;
+                                    let children =
+                                        self.scan_branch(sub_key_prefix_path, sub_key_prefix, left);
 
-                                tokio::pin!(children);
+                                    tokio::pin!(children);
 
-                                while let Some((key, value)) = children.next().await.transpose()? {
-                                    tracing::trace!("left-only: `{key:?}` => {value}");
-                                    visitor(TreeDiff::LeftOnly { key, value }).await;
+                                    while let Some((key, value)) =
+                                        children.next().await.transpose()?
+                                    {
+                                        tracing::trace!("left-only: `{key:?}` => {value}");
+
+                                        if visitor
+                                            .call(TreeDiff::LeftOnly { key, value })
+                                            .await
+                                            .is_stop()
+                                        {
+                                            return Ok(());
+                                        }
+                                    }
                                 }
                             }
                             Ordering::Greater => {
@@ -1462,11 +1604,15 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                                     }
                                 };
 
-                                stack.push_back(DiffStackItem::OnlyRight(SingleDiffStackItem {
-                                    key_prefix_path: right_key_prefix_path.clone(),
-                                    key_prefix: right_key_prefix.clone(),
-                                    branch: right.clone(),
-                                }));
+                                if options.wants_right() {
+                                    stack.push_back(DiffStackItem::OnlyRight(
+                                        SingleDiffStackItem {
+                                            key_prefix_path: right_key_prefix_path.clone(),
+                                            key_prefix: right_key_prefix.clone(),
+                                            branch: right.clone(),
+                                        },
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1538,20 +1684,34 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                                     }
                                 };
 
-                                let mut sub_key_prefix_path = right_key_prefix_path.clone();
-                                sub_key_prefix_path.push(sub_key.clone());
+                                if options.wants_right() {
+                                    let mut sub_key_prefix_path = right_key_prefix_path.clone();
+                                    sub_key_prefix_path.push(sub_key.clone());
 
-                                //FIXME: this will likely create a tree corruption: we need to
-                                //check if we reached a leaf before fetching the branch.
-                                let right = other.fetch_branch(sub_blob_id).await?;
-                                let children =
-                                    other.scan_branch(sub_key_prefix_path, sub_key_prefix, right);
+                                    //FIXME: this will likely create a tree corruption: we need to
+                                    //check if we reached a leaf before fetching the branch.
+                                    let right = other.fetch_branch(sub_blob_id).await?;
+                                    let children = other.scan_branch(
+                                        sub_key_prefix_path,
+                                        sub_key_prefix,
+                                        right,
+                                    );
 
-                                tokio::pin!(children);
+                                    tokio::pin!(children);
 
-                                while let Some((key, value)) = children.next().await.transpose()? {
-                                    tracing::trace!("right-only: `{key:?}` => {value}");
-                                    visitor(TreeDiff::RightOnly { key, value }).await;
+                                    while let Some((key, value)) =
+                                        children.next().await.transpose()?
+                                    {
+                                        tracing::trace!("right-only: `{key:?}` => {value}");
+
+                                        if visitor
+                                            .call(TreeDiff::RightOnly { key, value })
+                                            .await
+                                            .is_stop()
+                                        {
+                                            return Ok(());
+                                        }
+                                    }
                                 }
                             }
                             Ordering::Greater => {
@@ -1568,11 +1728,13 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                                     }
                                 };
 
-                                stack.push_back(DiffStackItem::OnlyLeft(SingleDiffStackItem {
-                                    key_prefix_path: left_key_prefix_path.clone(),
-                                    key_prefix: left_key_prefix.clone(),
-                                    branch: left.clone(),
-                                }));
+                                if options.wants_left() {
+                                    stack.push_back(DiffStackItem::OnlyLeft(SingleDiffStackItem {
+                                        key_prefix_path: left_key_prefix_path.clone(),
+                                        key_prefix: left_key_prefix.clone(),
+                                        branch: left.clone(),
+                                    }));
+                                }
                             }
                         }
                     }
@@ -1584,13 +1746,77 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
     }
 }
 
+/// A visitor for tree differences.
+pub trait Visitor<'s, Key> {
+    /// The future type returned by the visitor.
+    type Future: Future<Output = VisitResult> + 's;
+
+    /// Call the visitor with the specified tree difference.
+    fn call(&self, diff: TreeDiff<Key>) -> Self::Future;
+}
+
+impl<'s, Key, Fut: Future<Output = VisitResult> + 's, F: Fn(TreeDiff<Key>) -> Fut> Visitor<'s, Key>
+    for F
+{
+    type Future = Fut;
+
+    fn call(&self, diff: TreeDiff<Key>) -> Self::Future {
+        self(diff)
+    }
+}
+
+/// The options for diffing two trees.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DiffOptions {
+    /// Symmetric diffing.
+    #[default]
+    Symmetric,
+
+    /// Left-only diffing.
+    LeftOnly,
+
+    /// Right-only diffing.
+    RightOnly,
+}
+
+impl DiffOptions {
+    /// Check if the diffing options want the left tree.
+    const fn wants_left(&self) -> bool {
+        match self {
+            DiffOptions::Symmetric | DiffOptions::LeftOnly => true,
+            DiffOptions::RightOnly => false,
+        }
+    }
+
+    /// Check if the diffing options want the right tree.
+    const fn wants_right(&self) -> bool {
+        match self {
+            DiffOptions::Symmetric | DiffOptions::RightOnly => true,
+            DiffOptions::LeftOnly => false,
+        }
+    }
+}
+
 /// A visit result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisitResult {
     /// Continue visiting the tree.
     Continue,
+
     /// Stop visiting the tree.
     Stop,
+}
+
+impl VisitResult {
+    /// Check if the visit result is to continue.
+    pub fn is_continue(&self) -> bool {
+        matches!(self, VisitResult::Continue)
+    }
+
+    /// Check if the visit result is to stop.
+    pub fn is_stop(&self) -> bool {
+        matches!(self, VisitResult::Stop)
+    }
 }
 
 enum DiffStackItem {
@@ -1842,13 +2068,41 @@ mod tests {
         );
     }
 
+    macro_rules! assert_diff {
+        ($index:expr, $diff:expr) => {
+            let result = collect_diff(&$index, &$index).await;
+            assert_eq!(&result, $diff);
+        };
+        ($left:expr, $right:expr, $diff:expr) => {
+            let result = collect_diff(&$left, &$right).await;
+            assert_eq!(&result, &$diff);
+
+            let result = collect_diff(&$right, &$left).await;
+            assert_eq!(&result, &mirror_diff($diff));
+        };
+    }
+
+    fn mirror_diff(diff: Vec<TreeDiff<u64>>) -> Vec<TreeDiff<u64>> {
+        diff.into_iter()
+            .map(|diff| match diff {
+                TreeDiff::LeftOnly { key, value } => TreeDiff::RightOnly { key, value },
+                TreeDiff::RightOnly { key, value } => TreeDiff::LeftOnly { key, value },
+                TreeDiff::Diff { key, left, right } => TreeDiff::Diff {
+                    key,
+                    left: right,
+                    right: left,
+                },
+            })
+            .collect()
+    }
+
     async fn collect_diff<Key: FixedSizeKey + Send + Sync + std::fmt::Debug>(
         left: &FixedSizeIndex<Key>,
         right: &FixedSizeIndex<Key>,
     ) -> Vec<TreeDiff<Key>> {
         let results = tokio::sync::Mutex::new(Vec::with_capacity(4));
 
-        left.visit_differences(right, |diff| {
+        left.visit_differences(right, DiffOptions::Symmetric, |diff| {
             Box::pin(async {
                 let mut results = results.lock().await;
 
@@ -1878,8 +2132,7 @@ mod tests {
         assert_transaction_empty!(index);
 
         // Make sure a diff with ourselves yields no result.
-        let diffs: Vec<_> = collect_diff(&index, &index).await;
-        assert_eq!(diffs, vec![]);
+        assert_diff!(index, &[]);
 
         // Insert 1023 values in the tree to trigger actual transaction writing as well as
         // rebalancing.
@@ -1888,8 +2141,7 @@ mod tests {
         }
 
         // Make sure a diff with ourselves yields no result.
-        let diffs: Vec<_> = collect_diff(&index, &index).await;
-        assert_eq!(diffs, vec![]);
+        assert_diff!(index, &[]);
 
         {
             let mut index2 = index.fork("tx2").await;
@@ -1898,46 +2150,20 @@ mod tests {
             assert_insert_update!(index2, 16, "other-value", "value");
             assert_remove_exists!(index2, 128, "value");
 
-            let diffs: Vec<_> = collect_diff(&index, &index2).await;
-            assert_eq!(
-                diffs,
+            assert_diff!(
+                index,
+                index2,
                 vec![
                     TreeDiff::RightOnly {
                         key: 0,
                         value: blob_id!("new-value")
                     },
-                    TreeDiff::LeftOnly {
+                    TreeDiff::Diff {
                         key: 16,
-                        value: blob_id!("value")
-                    },
-                    TreeDiff::RightOnly {
-                        key: 16,
-                        value: blob_id!("other-value")
+                        left: blob_id!("value"),
+                        right: blob_id!("other-value")
                     },
                     TreeDiff::LeftOnly {
-                        key: 128,
-                        value: blob_id!("value")
-                    },
-                ]
-            );
-
-            let diffs: Vec<_> = collect_diff(&index2, &index).await;
-            assert_eq!(
-                diffs,
-                vec![
-                    TreeDiff::LeftOnly {
-                        key: 0,
-                        value: blob_id!("new-value")
-                    },
-                    TreeDiff::LeftOnly {
-                        key: 16,
-                        value: blob_id!("other-value")
-                    },
-                    TreeDiff::RightOnly {
-                        key: 16,
-                        value: blob_id!("value")
-                    },
-                    TreeDiff::RightOnly {
                         key: 128,
                         value: blob_id!("value")
                     },
@@ -1956,31 +2182,24 @@ mod tests {
                 assert_insert_new!(index3, i, "value");
             }
 
-            let diffs: Vec<_> = collect_diff(&index, &index3).await;
-            assert_eq!(diffs, vec![]);
-
-            let diffs: Vec<_> = collect_diff(&index3, &index).await;
-            assert_eq!(diffs, vec![]);
+            assert_diff!(index, index3, vec![]);
 
             assert_insert_new!(index3, 0, "new-value");
             assert_insert_update!(index3, 16, "other-value", "value");
             assert_remove_exists!(index3, 128, "value");
 
-            let diffs: Vec<_> = collect_diff(&index, &index3).await;
-            assert_eq!(
-                diffs,
+            assert_diff!(
+                index,
+                index3,
                 vec![
                     TreeDiff::RightOnly {
                         key: 0,
                         value: blob_id!("new-value")
                     },
-                    TreeDiff::LeftOnly {
+                    TreeDiff::Diff {
                         key: 16,
-                        value: blob_id!("value")
-                    },
-                    TreeDiff::RightOnly {
-                        key: 16,
-                        value: blob_id!("other-value")
+                        left: blob_id!("value"),
+                        right: blob_id!("other-value")
                     },
                     TreeDiff::LeftOnly {
                         key: 128,
