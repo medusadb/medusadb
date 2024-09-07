@@ -342,7 +342,7 @@ impl Gorgon {
                     hash,
                 };
 
-                storage.store(&remote_ref, source).await.map(Into::into)?;
+                storage.store(&remote_ref, source).await?;
 
                 Ok(remote_ref.into())
             }
