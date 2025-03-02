@@ -233,7 +233,7 @@ end = "2024-12-28"
 
 [[trusted.is-terminal]]
 criteria = "safe-to-deploy"
-user-id = 6825 # Dan Gohman (sunfishcode)
+user-id = 6825
 start = "2022-01-22"
 end = "2024-12-28"
 
@@ -245,7 +245,7 @@ end = "2024-12-28"
 
 [[trusted.js-sys]]
 criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
+user-id = 1
 start = "2019-03-04"
 end = "2024-12-28"
 
@@ -257,7 +257,7 @@ end = "2024-12-28"
 
 [[trusted.linux-raw-sys]]
 criteria = "safe-to-deploy"
-user-id = 6825 # Dan Gohman (sunfishcode)
+user-id = 6825
 start = "2021-06-12"
 end = "2024-12-28"
 
@@ -311,7 +311,7 @@ end = "2024-12-28"
 
 [[trusted.rustix]]
 criteria = "safe-to-deploy"
-user-id = 6825 # Dan Gohman (sunfishcode)
+user-id = 6825
 start = "2021-10-29"
 end = "2024-12-28"
 
@@ -383,31 +383,31 @@ end = "2024-12-28"
 
 [[trusted.wasm-bindgen]]
 criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
+user-id = 1
 start = "2019-03-04"
 end = "2024-12-28"
 
 [[trusted.wasm-bindgen-backend]]
 criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
+user-id = 1
 start = "2019-03-04"
 end = "2024-12-28"
 
 [[trusted.wasm-bindgen-macro]]
 criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
+user-id = 1
 start = "2019-03-04"
 end = "2024-12-28"
 
 [[trusted.wasm-bindgen-macro-support]]
 criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
+user-id = 1
 start = "2019-03-04"
 end = "2024-12-28"
 
 [[trusted.web-sys]]
 criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
+user-id = 1
 start = "2019-03-04"
 end = "2024-12-28"
 
