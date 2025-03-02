@@ -15,7 +15,7 @@ mod async_file_source;
 pub use async_file_read::AsyncFileRead;
 pub use async_file_source::AsyncFileSource;
 
-use crate::{storage::FilesystemStorage, AsyncSource};
+use crate::{AsyncSource, storage::FilesystemStorage};
 
 /// An interface to interact with the filesystem.
 ///
@@ -123,33 +123,37 @@ impl Filesystem {
                     )
                 })?;
 
-                if let Some(data) = source.data() {
-                    // If we have the data ready in memory, write it to disk directly.
-                    f.write_all(data).await.map_err(|err| {
-                        std::io::Error::new(
-                            err.kind(),
-                            format!("faild to write file `{}`", path.display()),
-                        )
-                    })?;
-                } else {
-                    let r = source.get_async_read().await.map_err(|err| {
-                        std::io::Error::new(
-                            err.kind(),
-                            format!(
-                                "failed to get source reader when writing `{}`",
-                                path.display()
-                            ),
-                        )
-                    })?;
-                    futures::io::copy(r, &mut f.compat_mut())
-                        .await
-                        .map_err(|err| {
+                match source.data() {
+                    Some(data) => {
+                        // If we have the data ready in memory, write it to disk directly.
+                        f.write_all(data).await.map_err(|err| {
                             std::io::Error::new(
                                 err.kind(),
-                                format!("failed to copy file `{}`", path.display()),
+                                format!("faild to write file `{}`", path.display()),
                             )
                         })?;
+                    }
+                    _ => {
+                        let r = source.get_async_read().await.map_err(|err| {
+                            std::io::Error::new(
+                                err.kind(),
+                                format!(
+                                    "failed to get source reader when writing `{}`",
+                                    path.display()
+                                ),
+                            )
+                        })?;
+                        futures::io::copy(r, &mut f.compat_mut())
+                            .await
+                            .map_err(|err| {
+                                std::io::Error::new(
+                                    err.kind(),
+                                    format!("failed to copy file `{}`", path.display()),
+                                )
+                            })?;
+                    }
                 }
+
                 f.shutdown().await.map_err(|err| {
                     std::io::Error::new(
                         err.kind(),

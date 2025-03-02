@@ -13,7 +13,7 @@ use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 
-use crate::{buf_utils, BlobId, HashAlgorithm};
+use crate::{BlobId, HashAlgorithm, buf_utils};
 
 /// An error type for [``RemoteRefs``](``RemoteRef``).
 #[derive(Debug, Error)]

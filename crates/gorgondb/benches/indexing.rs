@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, Criterion};
-use gorgondb::{indexing::FixedSizeIndex, BlobId, Client};
+use criterion::{Criterion, criterion_group, criterion_main};
+use gorgondb::{BlobId, Client, indexing::FixedSizeIndex};
 
 async fn fixed_size_index() {
     let client = Client::new_for_tests();

@@ -15,8 +15,8 @@ use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 
 use crate::{
-    buf_utils::{self, read_buffer_size_with_size_len},
     RemoteRef,
+    buf_utils::{self, read_buffer_size_with_size_len},
 };
 
 /// An error type for [``BlobIds``](``BlobId``).

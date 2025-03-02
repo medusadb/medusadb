@@ -1,6 +1,6 @@
 use std::task::Poll;
 
-use futures::{future::BoxFuture, AsyncRead, Future};
+use futures::{AsyncRead, Future, future::BoxFuture};
 use pin_project::pin_project;
 
 /// A structure that prepends a mandatory future to an `AsyncRead` before it can get polled.

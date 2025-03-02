@@ -1,6 +1,6 @@
 use std::{borrow::Cow, path::Path};
 
-use futures::{future::BoxFuture, AsyncRead};
+use futures::{AsyncRead, future::BoxFuture};
 
 use crate::{AsyncFileSource, AsyncSourceChain};
 

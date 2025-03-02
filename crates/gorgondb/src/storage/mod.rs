@@ -19,8 +19,8 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use crate::{
-    gorgon::{Retrieve, Store},
     RemoteRef,
+    gorgon::{Retrieve, Store},
 };
 
 /// An error type for storage implementations.

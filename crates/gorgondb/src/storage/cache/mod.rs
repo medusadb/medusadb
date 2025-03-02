@@ -158,23 +158,26 @@ impl Cache {
             }
 
             Ok(data.into())
-        } else if let Some(filesystem_storage) = &self.filesystem_storage {
-            match source.data() {
-                Some(data) => {
-                    // If the source is already in memory: don't use the filesystem source as a
-                    // result as it certainly be slower.
-                    filesystem_storage.store(remote_ref, data).await?;
-
-                    Ok(source)
-                }
-                None => filesystem_storage
-                    .store(remote_ref, source)
-                    .await
-                    .map(Into::into)
-                    .map_err(Into::into),
-            }
         } else {
-            Ok(source)
+            match &self.filesystem_storage {
+                Some(filesystem_storage) => {
+                    match source.data() {
+                        Some(data) => {
+                            // If the source is already in memory: don't use the filesystem source as a
+                            // result as it certainly be slower.
+                            filesystem_storage.store(remote_ref, data).await?;
+
+                            Ok(source)
+                        }
+                        None => filesystem_storage
+                            .store(remote_ref, source)
+                            .await
+                            .map(Into::into)
+                            .map_err(Into::into),
+                    }
+                }
+                _ => Ok(source),
+            }
         }
     }
 }

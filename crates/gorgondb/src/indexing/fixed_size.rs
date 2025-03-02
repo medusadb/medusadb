@@ -14,14 +14,14 @@ use tracing::trace;
 
 use byteorder::ByteOrder;
 use bytes::{Bytes, BytesMut};
-use futures::{future::BoxFuture, Stream, StreamExt};
+use futures::{Stream, StreamExt, future::BoxFuture};
 use serde::{Deserialize, Serialize};
 
-use crate::{gorgon::StoreOptions, BlobId, Transaction};
+use crate::{BlobId, Transaction, gorgon::StoreOptions};
 
 use super::{
-    tree::{ByteDeserialize, ByteSerialize, TreeItem},
     BinaryTreePathElement, Cache, Error, TreeDiff,
+    tree::{ByteDeserialize, ByteSerialize, TreeItem},
 };
 
 /// A trait for types that can be used as a fixed-size key.
@@ -363,19 +363,20 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
 
                 // There is some more key material to create under the missing key:
                 // start with this.
-                let has_leafs = if let Some(next_key) = next_key {
-                    let meta = TreeMeta {
-                        total_size: new_size,
-                        total_count: count_diff,
-                    };
+                let has_leafs = match next_key {
+                    Some(next_key) => {
+                        let meta = TreeMeta {
+                            total_size: new_size,
+                            total_count: count_diff,
+                        };
 
-                    let branch = TreeBranch::new_with_single_child(meta, next_key, value);
+                        let branch = TreeBranch::new_with_single_child(meta, next_key, value);
 
-                    value = self.persist_branch(branch).await?;
+                        value = self.persist_branch(branch).await?;
 
-                    false
-                } else {
-                    true
+                        false
+                    }
+                    _ => true,
                 };
 
                 // If we were to return the stack as-is, its top element would NOT have the
@@ -952,7 +953,9 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                 }
             }
             (None, Some(other_branch_id)) => {
-                tracing::debug!("comparing an empty index to a non-empty index `{other_branch_id}`: yielding all other values...");
+                tracing::debug!(
+                    "comparing an empty index to a non-empty index `{other_branch_id}`: yielding all other values..."
+                );
 
                 if options.wants_right() {
                     let stream = self.scan_root(other_branch_id);
@@ -1553,7 +1556,9 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                             Ordering::Less => {
                                 match &start_key_prefix {
                                     Some(start_key_prefix) if sub_key_prefix < start_key_prefix => {
-                                        tracing::trace!("left child has not yet reached start key prefix: skipping it.");
+                                        tracing::trace!(
+                                            "left child has not yet reached start key prefix: skipping it."
+                                        );
 
                                         break;
                                     }
@@ -1590,7 +1595,9 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                             Ordering::Greater => {
                                 match &stop_key_prefix {
                                     Some(stop_key_prefix) if sub_key_prefix >= stop_key_prefix => {
-                                        tracing::trace!("left child has reached stop key prefix: stopping iteration.");
+                                        tracing::trace!(
+                                            "left child has reached stop key prefix: stopping iteration."
+                                        );
 
                                         break;
                                     }
@@ -1672,7 +1679,9 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                             Ordering::Less => {
                                 match &start_key_prefix {
                                     Some(start_key_prefix) if sub_key_prefix < start_key_prefix => {
-                                        tracing::trace!("right child has not yet reached start key prefix: skipping it.");
+                                        tracing::trace!(
+                                            "right child has not yet reached start key prefix: skipping it."
+                                        );
 
                                         break;
                                     }
@@ -1714,7 +1723,9 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
                             Ordering::Greater => {
                                 match &stop_key_prefix {
                                     Some(stop_key_prefix) if sub_key_prefix >= stop_key_prefix => {
-                                        tracing::trace!("right child has reached stop key prefix: stopping iteration.");
+                                        tracing::trace!(
+                                            "right child has reached stop key prefix: stopping iteration."
+                                        );
 
                                         break;
                                     }

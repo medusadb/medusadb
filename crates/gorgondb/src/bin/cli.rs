@@ -6,8 +6,8 @@ use aws_config::BehaviorVersion;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use gorgondb::{
-    gorgon::StoreOptions, indexing::FixedSizeIndex, storage::AwsStorage, BlobId, Client,
-    Filesystem, Storage,
+    BlobId, Client, Filesystem, Storage, gorgon::StoreOptions, indexing::FixedSizeIndex,
+    storage::AwsStorage,
 };
 
 #[derive(Parser)]

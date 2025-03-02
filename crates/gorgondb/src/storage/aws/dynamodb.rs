@@ -110,7 +110,9 @@ impl Storage {
             Err(aws_sdk_dynamodb::error::SdkError::ServiceError(err))
                 if err.err().is_conditional_check_failed_exception() =>
             {
-                debug!("AWS DynamoDB key for `{remote_ref}` already exists: assuming it has the appropriate value.");
+                debug!(
+                    "AWS DynamoDB key for `{remote_ref}` already exists: assuming it has the appropriate value."
+                );
 
                 Ok(())
             }

@@ -6,13 +6,13 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::{future::BoxFuture, TryStreamExt};
-use humansize::{FormatSize, BINARY};
-use tracing::{instrument, Level};
+use futures::{TryStreamExt, future::BoxFuture};
+use humansize::{BINARY, FormatSize};
+use tracing::{Level, instrument};
 
 use crate::{
-    ledger::Ledger, AsyncFileSource, AsyncSource, AsyncSourceChain, BlobId, Filesystem,
-    FragmentationMethod, HashAlgorithm, RemoteRef,
+    AsyncFileSource, AsyncSource, AsyncSourceChain, BlobId, Filesystem, FragmentationMethod,
+    HashAlgorithm, RemoteRef, ledger::Ledger,
 };
 
 /// An error type.
@@ -159,7 +159,8 @@ impl Gorgon {
                 }
                 BlobId::RemoteRef(remote_ref) => {
                     tracing::debug!(
-                        "Blob points to {} bytes stored remotely in ref `{remote_ref}`: fetching from storage...", remote_ref.ref_size()
+                        "Blob points to {} bytes stored remotely in ref `{remote_ref}`: fetching from storage...",
+                        remote_ref.ref_size()
                     );
 
                     match storage.retrieve(&remote_ref).await? {
@@ -224,7 +225,8 @@ impl Gorgon {
                 }
                 BlobId::RemoteRef(remote_ref) => {
                     tracing::debug!(
-                        "Blob points to {} bytes stored remotely in ref `{remote_ref}`: fetching from storage...", remote_ref.ref_size()
+                        "Blob points to {} bytes stored remotely in ref `{remote_ref}`: fetching from storage...",
+                        remote_ref.ref_size()
                     );
 
                     match storage.retrieve(remote_ref).await? {

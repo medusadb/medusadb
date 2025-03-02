@@ -5,9 +5,9 @@ use tokio::sync::RwLock;
 use tracing::{debug, trace};
 
 use crate::{
+    Filesystem, RemoteRef,
     gorgon::{Retrieve, Store, Unstore},
     storage::{Error, FilesystemStorage},
-    Filesystem, RemoteRef,
 };
 
 // An in-memory/on-disk local storage for transactions.
@@ -78,23 +78,34 @@ impl Storage {
 
         while let Some((remote_ref, ref_counted_blob)) = blobs_iter.next() {
             if let Err(err) = match &ref_counted_blob.data {
-                Some(data) => self.base_storage.store(&remote_ref, data.clone().into()).await,
+                Some(data) => {
+                    self.base_storage
+                        .store(&remote_ref, data.clone().into())
+                        .await
+                }
                 None => match self.filesystem_storage.retrieve(&remote_ref).await {
-                    Ok(Some(source)) => {
-                        self.base_storage.store(&remote_ref, source.into()).await
-                    }
-                    Ok(None) => Err(Error::DataCorruption(format!("the remote-ref `{remote_ref}` should exist in the local filesystem storage"))),
+                    Ok(Some(source)) => self.base_storage.store(&remote_ref, source.into()).await,
+                    Ok(None) => Err(Error::DataCorruption(format!(
+                        "the remote-ref `{remote_ref}` should exist in the local filesystem storage"
+                    ))),
                     Err(err) => Err(err.into()),
                 },
             } {
                 // Make sure we add back to to blobs the non-handled ones.
-                return Err((Self{
-                    name: self.name,
-                    disk_size_threshold: self.disk_size_threshold,
-                    remote_refs: RwLock::new(std::iter::once((remote_ref, ref_counted_blob)).chain(blobs_iter).collect()),
-                    filesystem_storage: self.filesystem_storage,
-                    base_storage: self.base_storage,
-                }, err))
+                return Err((
+                    Self {
+                        name: self.name,
+                        disk_size_threshold: self.disk_size_threshold,
+                        remote_refs: RwLock::new(
+                            std::iter::once((remote_ref, ref_counted_blob))
+                                .chain(blobs_iter)
+                                .collect(),
+                        ),
+                        filesystem_storage: self.filesystem_storage,
+                        base_storage: self.base_storage,
+                    },
+                    err,
+                ));
             }
         }
 
@@ -118,8 +129,7 @@ impl Store for Storage {
 
                 trace!(
                     "Incremented reference count of `{remote_ref}` to {} in transaction storage `{}`",
-                    entry.count,
-                    self.name
+                    entry.count, self.name
                 );
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -176,30 +186,34 @@ impl Retrieve for Storage {
 #[async_trait]
 impl Unstore for Storage {
     async fn unstore(&self, remote_ref: &RemoteRef) {
-        if let std::collections::hash_map::Entry::Occupied(entry) =
-            self.remote_refs.write().await.entry(remote_ref.clone())
-        {
-            // The entry exists already: if it has a single reference, we must delete it
-            // entirely.
-            if entry.get().is_last_ref() {
-                entry.remove();
+        match self.remote_refs.write().await.entry(remote_ref.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                // The entry exists already: if it has a single reference, we must delete it
+                // entirely.
+                if entry.get().is_last_ref() {
+                    entry.remove();
 
-                trace!(
-                    "Removed last reference to `{remote_ref}` from transaction storage `{}`",
-                    self.name
-                );
-            } else {
-                let entry = entry.into_mut();
+                    trace!(
+                        "Removed last reference to `{remote_ref}` from transaction storage `{}`",
+                        self.name
+                    );
+                } else {
+                    let entry = entry.into_mut();
 
-                entry.count -= 1;
+                    entry.count -= 1;
 
-                trace!("Decremented reference count to `{remote_ref}` to {} in transaction storage `{}`", entry.count, self.name);
+                    trace!(
+                        "Decremented reference count to `{remote_ref}` to {} in transaction storage `{}`",
+                        entry.count, self.name
+                    );
+                }
             }
-        } else {
-            trace!(
+            _ => {
+                trace!(
                     "No existing reference to `{remote_ref}` in transaction storage `{}`: nothing to unstore.",
                     self.name
                 );
+            }
         }
     }
 }

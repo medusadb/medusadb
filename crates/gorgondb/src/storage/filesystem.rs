@@ -8,7 +8,7 @@ use std::{
 use hex::ToHex;
 use tempfile::TempDir;
 
-use crate::{filesystem::AsyncFileSource, AsyncSource, Filesystem, RemoteRef};
+use crate::{AsyncSource, Filesystem, RemoteRef, filesystem::AsyncFileSource};
 
 /// A storage that stores value on disk.
 #[derive(Debug, Clone)]

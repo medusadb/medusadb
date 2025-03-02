@@ -4,7 +4,7 @@ use std::{fmt::Display, num::NonZeroU64, sync::Arc};
 
 use bytes::Bytes;
 use itertools::Itertools;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::BlobId;
 
@@ -252,7 +252,7 @@ pub struct BinaryTreePathElement(#[serde(with = "serde_binary_tree_path_elem")] 
 
 mod serde_binary_tree_path_elem {
     use bytes::Bytes;
-    use serde::{de::Error, Deserializer, Serialize, Serializer};
+    use serde::{Deserializer, Serialize, Serializer, de::Error};
     use serde_bytes::Deserialize;
 
     use super::TreePathElementError;

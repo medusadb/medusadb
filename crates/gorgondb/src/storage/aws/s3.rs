@@ -92,7 +92,10 @@ impl Storage {
             }
             Ok(false) => {}
             Err(err) => {
-                tracing::warn!("failed to assess S3 object existence for `s3://{}{key}` ({err}): assuming non-existence", &self.bucket);
+                tracing::warn!(
+                    "failed to assess S3 object existence for `s3://{}{key}` ({err}): assuming non-existence",
+                    &self.bucket
+                );
             }
         }
 

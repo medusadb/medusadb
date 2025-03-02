@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use gorgondb::{
-    indexing::{BinaryTreePathElement, FixedSizeKey, TreeBranch},
     BlobId,
+    indexing::{BinaryTreePathElement, FixedSizeKey, TreeBranch},
 };
 
 fn criterion_unit(c: &mut Criterion) {

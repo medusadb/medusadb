@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use byteorder::{ReadBytesExt, WriteBytesExt};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::{buf_utils, BlobId};
+use crate::{BlobId, buf_utils};
 
 /// A `Ledger` is the definition for a blob of data, formed by other blobs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,8 +40,10 @@ impl Ledger {
                 if info_bits != 0 {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("unexpected info bits of `{info_bits:02x}` when reading linear aggregate header"))
-                    );
+                        format!(
+                            "unexpected info bits of `{info_bits:02x}` when reading linear aggregate header"
+                        ),
+                    ));
                 }
 
                 let mut blob_ids = Vec::with_capacity(
@@ -76,8 +78,10 @@ impl Ledger {
                 if info_bits != 0 {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("unexpected info bits of `{info_bits:02x}` when reading linear aggregate header"))
-                    );
+                        format!(
+                            "unexpected info bits of `{info_bits:02x}` when reading linear aggregate header"
+                        ),
+                    ));
                 }
 
                 let mut blob_ids = Vec::with_capacity(

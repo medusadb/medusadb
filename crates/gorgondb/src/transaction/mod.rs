@@ -9,8 +9,8 @@ use std::{
 use tracing::trace;
 
 use crate::{
-    gorgon::{Error, Result, StoreOptions},
     AsyncFileSource, AsyncSource, BlobId, Gorgon,
+    gorgon::{Error, Result, StoreOptions},
 };
 
 use self::storage::Storage;
@@ -61,7 +61,7 @@ impl Transaction {
     }
 
     /// Get the blobs referenced by this transaction.
-    pub async fn get_blobs(&self) -> impl Iterator<Item = BlobId> {
+    pub async fn get_blobs(&self) -> impl Iterator<Item = BlobId> + use<> {
         self.storage
             .get_remote_refs()
             .await
