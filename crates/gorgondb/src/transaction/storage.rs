@@ -1,6 +1,5 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
-use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tracing::{debug, trace};
 
@@ -113,7 +112,6 @@ impl Storage {
     }
 }
 
-#[async_trait]
 impl Store for Storage {
     async fn store(
         &self,
@@ -154,7 +152,6 @@ impl Store for Storage {
     }
 }
 
-#[async_trait]
 impl Retrieve for Storage {
     async fn retrieve<'s>(
         &'s self,
@@ -183,7 +180,6 @@ impl Retrieve for Storage {
     }
 }
 
-#[async_trait]
 impl Unstore for Storage {
     async fn unstore(&self, remote_ref: &RemoteRef) {
         match self.remote_refs.write().await.entry(remote_ref.clone()) {

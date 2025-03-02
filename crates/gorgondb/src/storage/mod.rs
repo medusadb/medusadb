@@ -15,7 +15,6 @@ pub use cache::Cache;
 pub use filesystem::FilesystemStorage;
 pub use memory::MemoryStorage;
 
-use async_trait::async_trait;
 use tracing::debug;
 
 use crate::{
@@ -91,7 +90,6 @@ impl Storage {
     }
 }
 
-#[async_trait]
 impl Retrieve for Storage {
     /// Retrieve a value
     async fn retrieve<'s>(
@@ -113,7 +111,6 @@ impl Retrieve for Storage {
     }
 }
 
-#[async_trait]
 impl Store for Storage {
     /// Store a value and ensures it has the proper remote ref.
     async fn store(
@@ -141,7 +138,6 @@ enum StorageImpl {
     Aws(aws::AwsStorage),
 }
 
-#[async_trait]
 impl Retrieve for StorageImpl {
     /// Retrieve a value
     async fn retrieve<'s>(
@@ -157,7 +153,6 @@ impl Retrieve for StorageImpl {
     }
 }
 
-#[async_trait]
 impl Store for StorageImpl {
     /// Store a value and ensures it has the proper remote ref.
     async fn store(&self, remote_ref: &RemoteRef, source: crate::AsyncSource<'_>) -> Result<()> {

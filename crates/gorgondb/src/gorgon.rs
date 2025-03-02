@@ -5,8 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use async_trait::async_trait;
-use futures::{TryStreamExt, future::BoxFuture};
+use futures::{TryStreamExt, future::LocalBoxFuture};
 use humansize::{BINARY, FormatSize};
 use tracing::{Level, instrument};
 
@@ -120,7 +119,7 @@ impl Gorgon {
         &'s self,
         storage: &'s (impl Retrieve + Sync),
         blob_id: BlobId,
-    ) -> BoxFuture<'s, Result<AsyncSource<'s>>> {
+    ) -> LocalBoxFuture<'s, Result<AsyncSource<'s>>> {
         Box::pin(async move {
             Ok(match blob_id {
                 BlobId::SelfContained(buf) => {
@@ -186,7 +185,7 @@ impl Gorgon {
         &'s self,
         storage: &'s (impl Retrieve + Sync),
         blob_id: &'s BlobId,
-    ) -> BoxFuture<'s, Result<AsyncSource<'s>>> {
+    ) -> LocalBoxFuture<'s, Result<AsyncSource<'s>>> {
         Box::pin(async move {
             Ok(match blob_id {
                 BlobId::SelfContained(buf) => {
@@ -276,7 +275,7 @@ impl Gorgon {
         storage: &'s (impl Store + Sync),
         source: AsyncSource<'s>,
         options: &'s StoreOptions,
-    ) -> BoxFuture<'s, Result<BlobId>> {
+    ) -> LocalBoxFuture<'s, Result<BlobId>> {
         Box::pin(async move {
             let ref_size = source.size();
 
@@ -355,7 +354,7 @@ impl Gorgon {
         &'s self,
         storage: &'s (impl Retrieve + Unstore + Sync),
         blob_id: &'s BlobId,
-    ) -> BoxFuture<'s, Result<()>> {
+    ) -> LocalBoxFuture<'s, Result<()>> {
         Box::pin(async move {
             match blob_id {
                 BlobId::SelfContained(_) => {}
@@ -395,33 +394,30 @@ impl Gorgon {
 }
 
 /// A trait for types that can retrieve remote blobs.
-#[async_trait]
 pub trait Retrieve {
     /// Retrieve a remote reference.
     ///
     /// If it doesn't exist, `Ok(None)` is returned.
-    async fn retrieve<'s>(
+    fn retrieve<'s>(
         &'s self,
         remote_ref: &RemoteRef,
-    ) -> crate::storage::Result<Option<crate::AsyncSource<'s>>>;
+    ) -> impl Future<Output = crate::storage::Result<Option<crate::AsyncSource<'s>>>>;
 }
 
 /// A trait for types that can store remote blobs.
-#[async_trait]
 pub trait Store {
-    async fn store(
+    fn store(
         &self,
         remote_ref: &RemoteRef,
         source: crate::AsyncSource<'_>,
-    ) -> crate::storage::Result<()>;
+    ) -> impl Future<Output = crate::storage::Result<()>>;
 }
 
 /// A trait for types that can unstore remote blobs.
-#[async_trait]
 pub trait Unstore {
     /// Unstore a value.
     ///
     /// If `unstore` is called as many times as `store` was called for a value, the `store` is
     /// effectively cancelled, exactly as if it did not happen.
-    async fn unstore(&self, remote_ref: &RemoteRef);
+    fn unstore(&self, remote_ref: &RemoteRef) -> impl Future<Output = ()>;
 }

@@ -18,7 +18,6 @@ medusadb = { path = "crates/medusadb" }
 
 anyhow = "1"
 async-compat = "0.2"
-async-trait = "0.1"
 async-stream = "0.3"
 aws-config = "1"
 aws-sdk-s3 = "1"

@@ -14,7 +14,7 @@ use tracing::trace;
 
 use byteorder::ByteOrder;
 use bytes::{Bytes, BytesMut};
-use futures::{Stream, StreamExt, future::BoxFuture};
+use futures::{Stream, StreamExt, future::LocalBoxFuture};
 use serde::{Deserialize, Serialize};
 
 use crate::{BlobId, Transaction, gorgon::StoreOptions};
@@ -552,7 +552,7 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
         &self,
         mut stack: TreeSearchStack,
         next_key: Option<Bytes>,
-    ) -> BoxFuture<'_, Result<TreeSearchResult>> {
+    ) -> LocalBoxFuture<'_, Result<TreeSearchResult>> {
         Box::pin(async move {
             match stack.top_value() {
                 Some(id) => {
