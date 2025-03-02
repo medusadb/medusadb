@@ -73,11 +73,7 @@ impl FilesystemStorage {
 
         match self.filesystem.load_source(&path).await? {
             Some(source) => Ok(source),
-            None => self
-                .filesystem
-                .save_source(path, source)
-                .await
-                .map_err(Into::into),
+            None => self.filesystem.save_source(path, source).await,
         }
     }
 

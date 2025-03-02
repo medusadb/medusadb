@@ -824,17 +824,14 @@ impl<Key: FixedSizeKey + Send + Sync + std::fmt::Debug> FixedSizeIndex<Key> {
     /// this to search for values. It's almost never what you want.
     pub fn scan(&self) -> impl Stream<Item = Result<(Key, BlobId)>> + '_ {
         try_stream! {
-            match &self.root.branch_id {
-                Some(branch_id) => {
-                    let stream = self.scan_root(branch_id);
+            if let Some(branch_id) = &self.root.branch_id {
+                let stream = self.scan_root(branch_id);
 
-                    tokio::pin!(stream);
+                tokio::pin!(stream);
 
-                    while let Some(item) = stream.next().await {
-                        yield item?;
-                    }
+                while let Some(item) = stream.next().await {
+                    yield item?;
                 }
-                None => {}
             }
         }
     }

@@ -120,7 +120,7 @@ impl Gorgon {
         &'s self,
         storage: &'s (impl Retrieve + Sync),
         blob_id: BlobId,
-    ) -> BoxFuture<Result<AsyncSource<'s>>> {
+    ) -> BoxFuture<'s, Result<AsyncSource<'s>>> {
         Box::pin(async move {
             Ok(match blob_id {
                 BlobId::SelfContained(buf) => {
@@ -185,7 +185,7 @@ impl Gorgon {
         &'s self,
         storage: &'s (impl Retrieve + Sync),
         blob_id: &'s BlobId,
-    ) -> BoxFuture<Result<AsyncSource<'s>>> {
+    ) -> BoxFuture<'s, Result<AsyncSource<'s>>> {
         Box::pin(async move {
             Ok(match blob_id {
                 BlobId::SelfContained(buf) => {

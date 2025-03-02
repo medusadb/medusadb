@@ -132,7 +132,7 @@ impl<'d> AsyncSource<'d> {
     }
 
     /// Get an asynchronous reader from this `AsyncSource`.
-    pub fn get_async_read(&'d self) -> BoxFuture<std::io::Result<BoxAsyncRead<'d>>> {
+    pub fn get_async_read(&'d self) -> BoxFuture<'d, std::io::Result<BoxAsyncRead<'d>>> {
         match self {
             Self::Static(buf) => {
                 Box::pin(async move { Ok(Box::new(futures::io::Cursor::new(buf)) as BoxAsyncRead) })

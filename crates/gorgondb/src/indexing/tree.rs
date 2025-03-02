@@ -134,7 +134,7 @@ pub struct TreeBranchOccupiedEntry<'b, KeyElem, Meta> {
     idx: usize,
 }
 
-impl<'b, KeyElem, Meta> TreeBranchOccupiedEntry<'b, KeyElem, Meta> {
+impl<KeyElem, Meta> TreeBranchOccupiedEntry<'_, KeyElem, Meta> {
     /// Get the value associated to the entry.
     pub fn value(&self) -> &BlobId {
         &self
@@ -172,7 +172,7 @@ pub struct TreeBranchVacantEntry<'b, KeyElem, Meta> {
     key: KeyElem,
 }
 
-impl<'b, KeyElem, Meta> TreeBranchVacantEntry<'b, KeyElem, Meta> {
+impl<KeyElem, Meta> TreeBranchVacantEntry<'_, KeyElem, Meta> {
     /// Insert a value in the vacant entry.
     pub fn insert(self, id: BlobId) {
         self.branch

@@ -25,7 +25,7 @@ pub(crate) fn write_buffer_size_len(
     assert!(size_len <= 0x3f, "size_len should be stricly less than 64");
     assert!(info_bits <= 4, "info_bits should be stricly less than 4");
 
-    let size_len = size_len | info_bits << 6;
+    let size_len = size_len | (info_bits << 6);
 
     w.write_u8(size_len)?;
 
@@ -41,7 +41,7 @@ pub(crate) async fn async_write_buffer_size_len(
     assert!(size_len <= 0x3f, "size_len should be stricly less than 64");
     assert!(info_bits <= 4, "info_bits should be stricly less than 4");
 
-    let size_len = size_len | info_bits << 6;
+    let size_len = size_len | (info_bits << 6);
 
     w.write_all(&[size_len]).await?;
 
